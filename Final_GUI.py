@@ -73,7 +73,7 @@ root.tk.call("source", "Azure-ttk-theme-main/azure.tcl")
 root.tk.call("set_theme", "dark")
 
 root.title("Hand Gesture Recognition GUI")
-root.geometry("500x900") 
+root.geometry("350x900") 
 
 # Tkinter label to display real-time predicted inputs during recording
 predicted_label = tk.Label(root, text="Predicted Inputs: ")
@@ -124,22 +124,6 @@ def text_to_speech_realtime():
         tts = gTTS(sentence, lang='en')
         tts.save("output.mp3")
         os.system("start output.mp3")  # This will play the generated audio file
-
-# Button for Reset Dataset Labels
-def reset_dataset_labels():
-    global labels_dict
-    labels_dict = {}  # Reset labels_dict
-
-    dataset_path = "./data"
-    dataset_count = sum(os.path.isdir(os.path.join(dataset_path, f)) for f in os.listdir(dataset_path))
-
-    for i in range(dataset_count):
-        gesture_name = simpledialog.askstring("Dataset Calibration", f"Enter name for Gesture {i}:")
-        labels_dict[i] = gesture_name
-
-    with open(labels_dict_file, 'w') as json_file:
-        json.dump(labels_dict, json_file)
-    messagebox.showinfo("Dataset Labels Reset", "Gesture names have been reset.")
 
 # Button for Add Gesture
 def add_gesture():
@@ -349,9 +333,6 @@ def toggle_gesture_buttons():
 calibrate_button = ttk.Button(root, text="Calibrate Model", command=calibrate_model)
 calibrate_button.pack(side=tk.TOP, fill=tk.X, padx=20, pady=(20, 30))
 
-reset_labels_button = ttk.Button(gesture_frame, text="Reset Gesture Names", command=reset_dataset_labels)
-reset_labels_button.pack(side=tk.LEFT, padx=10)
-
 set_timer_button = ttk.Button(root, text="Set Timer", command=set_timer)
 set_timer_button.pack(side=tk.TOP, fill=tk.X, padx=20, pady=(20, 30))
 
@@ -365,11 +346,11 @@ stop_record_button.pack(side=tk.TOP, fill=tk.X, padx=20, pady=(20, 30))
 tts_button = ttk.Button(root, text="Text To Speech", command=text_to_speech_realtime)
 tts_button.pack(side=tk.TOP, fill=tk.X, padx=20, pady=(20, 30))
 
-add_gesture_button = ttk.Button(gesture_frame, text="Add Gesture", command=add_gesture)
-add_gesture_button.pack(side=tk.LEFT, padx=10)
+add_gesture_button = ttk.Button(gesture_frame, text="Add New Gesture", command=add_gesture)
+add_gesture_button.pack(side=tk.LEFT, padx=15)
 
 view_gestures_button = ttk.Button(gesture_frame, text="View Gestures", command=view_gestures)
-view_gestures_button.pack(side=tk.LEFT, padx=15)
+view_gestures_button.pack(side=tk.LEFT, padx=20)
 
 gestures_button = ttk.Button(root, text="Gestures", command=toggle_gesture_buttons)
 gestures_button.pack(side=tk.TOP, fill=tk.X, padx=20, pady=(20, 30))
