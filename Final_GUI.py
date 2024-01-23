@@ -73,7 +73,7 @@ root.tk.call("source", "Azure-ttk-theme-main/azure.tcl")
 root.tk.call("set_theme", "dark")
 
 root.title("Hand Gesture Recognition GUI")
-root.geometry("450x800") 
+root.geometry("500x900") 
 
 # Tkinter label to display real-time predicted inputs during recording
 predicted_label = tk.Label(root, text="Predicted Inputs: ")
