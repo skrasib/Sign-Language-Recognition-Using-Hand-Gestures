@@ -13,9 +13,17 @@ SRC_DIR = PROJECT_ROOT / "src"
 sys.path.insert(0, str(SRC_DIR))
 
 
+from adaptive_gesture.features.dynamic_features import (
+    build_dynamic_observation,
+    prepare_dynamic_trajectory,
+)
 from adaptive_gesture.features.hand_features import build_frame_features
+from adaptive_gesture.learning.dynamic_learner import DynamicGestureLearner
+from adaptive_gesture.learning.motion_segmenter import MotionSegmenter
 from adaptive_gesture.learning.online_learner import OnlineGestureLearner
+from adaptive_gesture.learning.prediction_stabilizer import PredictionStabilizer
 from adaptive_gesture.learning.sample_selector import SmartSampleSelector
+from adaptive_gesture.storage.dynamic_gesture_store import DynamicGestureStore
 from adaptive_gesture.storage.gesture_store import GestureStore
 from adaptive_gesture.tracking.hand_tracker import HandTracker
 
@@ -37,6 +45,26 @@ class InteractiveGestureApp:
         )
         self.selector = None
 
+        # Dynamic few-shot engine. Dynamic classes are intentionally separate
+        # from static classes so the mature static path remains unchanged.
+        self.dynamic_learner = DynamicGestureLearner(
+            minimum_templates=3,
+            threshold_multiplier=1.60,
+            minimum_threshold=0.045,
+            ambiguity_ratio=1.12,
+            max_templates=6,
+        )
+        self.motion_segmenter = MotionSegmenter()
+
+        # Temporal prediction stabilization. A known label must appear in
+        # 3 consecutive recognition updates before it becomes confirmed.
+        # UNKNOWN uses 2 updates so stale known labels are released faster.
+        self.prediction_stabilizer = PredictionStabilizer(
+            confirm_frames=3,
+            unknown_confirm_frames=2,
+            unknown_label=self.learner.UNKNOWN_LABEL,
+        )
+
         # Persistent numerical gesture memory.
         self.gesture_store = GestureStore(
             PROJECT_ROOT / "data" / "gesture_memory.json"
@@ -47,6 +75,21 @@ class InteractiveGestureApp:
         except Exception as error:
             self.restored_gestures = 0
             self.restore_error = str(error)
+
+        # Dynamic gesture trajectories are stored separately from the existing
+        # static memory. This avoids risky schema changes and stores landmarks
+        # only -- never camera frames or videos.
+        self.dynamic_gesture_store = DynamicGestureStore(
+            PROJECT_ROOT / "data" / "dynamic_gesture_memory.json"
+        )
+        self.dynamic_restore_error = None
+        try:
+            self.restored_dynamic_gestures = (
+                self.dynamic_gesture_store.load_into(self.dynamic_learner)
+            )
+        except Exception as error:
+            self.restored_dynamic_gestures = 0
+            self.dynamic_restore_error = str(error)
 
         # Camera.
         self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
@@ -60,6 +103,7 @@ class InteractiveGestureApp:
         self.current_features = None
         self.current_hand_signature = None
         self.current_prediction = None
+        self.current_raw_prediction = None
         self.current_hands = []
 
         # Keep the camera preview smooth. Recognition/UI metrics do not need
@@ -77,6 +121,20 @@ class InteractiveGestureApp:
         self.required_teaching_signature = None
         self.prepare_until = None
 
+        # Dynamic teaching/runtime state. Training uses explicit Start/Stop Demo
+        # controls for clean few-shot examples; recognition uses automatic
+        # motion onset/offset segmentation.
+        self.dynamic_teaching = False
+        self.dynamic_demo_recording = False
+        self.dynamic_teaching_name = None
+        self.dynamic_required_signature = None
+        self.dynamic_demo_observations = []
+        self.dynamic_templates = []
+        self.dynamic_target_demos = self.dynamic_learner.minimum_templates
+        self.dynamic_sample_interval = 0.04  # ~25 Hz temporal sampling
+        self.last_dynamic_sample_time = 0.0
+        self.dynamic_prediction_hold_until = 0.0
+
         # Feedback state.
         self.feedback_features = None
         self.feedback_predicted_label = None
@@ -88,7 +146,7 @@ class InteractiveGestureApp:
         self.prediction_var = tk.StringVar(value="UNKNOWN")
         self.distance_var = tk.StringVar(value="Distance: —")
         self.threshold_var = tk.StringVar(value="Threshold: —")
-        self.relative_distance_var = tk.StringVar(value="Relative distance: —")
+        self.relative_distance_var = tk.StringVar(value="Relative score: —\nConfidence index: —")
         self.rejection_reason_var = tk.StringVar(value="")
         self.tracking_var = tk.StringVar(value="No hand detected")
         self.status_var = tk.StringVar(value="")
@@ -102,8 +160,19 @@ class InteractiveGestureApp:
 
         self.actual_gesture_var = tk.StringVar()
 
+        # Dynamic gesture UI state.
+        self.dynamic_name_var = tk.StringVar()
+        self.dynamic_prediction_var = tk.StringVar(value="—")
+        self.dynamic_distance_var = tk.StringVar(value="Distance: —\nConfidence index: —")
+        self.dynamic_runtime_state_var = tk.StringVar(value="Dynamic: IDLE")
+        self.dynamic_status_var = tk.StringVar(value="")
+        self.dynamic_demo_progress_var = tk.StringVar(
+            value=f"Demonstrations: 0/{self.dynamic_target_demos}"
+        )
+
         self.build_ui()
         self.refresh_gesture_table()
+        self.refresh_dynamic_gesture_table()
 
         if self.restore_error:
             self.status_var.set(
@@ -118,6 +187,22 @@ class InteractiveGestureApp:
         else:
             self.status_var.set(
                 "No saved gestures yet. Teach a new gesture to begin."
+            )
+
+        if self.dynamic_restore_error:
+            self.dynamic_status_var.set(
+                "Dynamic memory could not be restored: "
+                + self.dynamic_restore_error
+            )
+        elif self.restored_dynamic_gestures > 0:
+            suffix = "s" if self.restored_dynamic_gestures != 1 else ""
+            self.dynamic_status_var.set(
+                f"✓ Restored {self.restored_dynamic_gestures} dynamic "
+                f"gesture{suffix} from previous sessions."
+            )
+        else:
+            self.dynamic_status_var.set(
+                "No dynamic gestures saved yet. Teach 3 live demonstrations."
             )
 
         self.root.protocol("WM_DELETE_WINDOW", self.close)
@@ -154,15 +239,20 @@ class InteractiveGestureApp:
 
         self.live_tab = ttk.Frame(notebook, padding=16)
         self.library_tab = ttk.Frame(notebook, padding=16)
+        self.dynamic_tab = ttk.Frame(notebook, padding=16)
         notebook.add(self.live_tab, text="Live")
         notebook.add(self.library_tab, text="Gesture Library")
+        notebook.add(self.dynamic_tab, text="Dynamic Gestures")
 
         self.live_tab.columnconfigure(0, weight=1)
         self.library_tab.columnconfigure(0, weight=1)
         self.library_tab.rowconfigure(1, weight=1)
+        self.dynamic_tab.columnconfigure(0, weight=1)
+        self.dynamic_tab.rowconfigure(8, weight=1)
 
         self.build_live_tab(self.live_tab)
         self.build_library_tab(self.library_tab)
+        self.build_dynamic_tab(self.dynamic_tab)
 
     def build_live_tab(self, panel):
         ttk.Label(
@@ -325,6 +415,30 @@ class InteractiveGestureApp:
 
         self.correction_frame.grid_remove()
 
+        # Dynamic recognition is segment-based and shown separately so static
+        # frame classification remains unchanged.
+        dynamic_live = ttk.LabelFrame(
+            panel,
+            text="Dynamic Recognition",
+            padding=10,
+        )
+        dynamic_live.grid(row=16, column=0, sticky="ew", pady=(14, 0))
+        dynamic_live.columnconfigure(0, weight=1)
+
+        ttk.Label(
+            dynamic_live,
+            textvariable=self.dynamic_prediction_var,
+            font=("Segoe UI", 18, "bold"),
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            dynamic_live,
+            textvariable=self.dynamic_distance_var,
+        ).grid(row=1, column=0, sticky="w")
+        ttk.Label(
+            dynamic_live,
+            textvariable=self.dynamic_runtime_state_var,
+        ).grid(row=2, column=0, sticky="w")
+
     def build_library_tab(self, panel):
         ttk.Label(
             panel,
@@ -419,6 +533,144 @@ class InteractiveGestureApp:
             wraplength=440,
         ).grid(row=3, column=0, sticky="w", pady=(10, 0))
 
+    def build_dynamic_tab(self, panel):
+        ttk.Label(
+            panel,
+            text="Teach a Dynamic Gesture",
+            font=("Segoe UI", 12, "bold"),
+        ).grid(row=0, column=0, sticky="w")
+
+        ttk.Label(
+            panel,
+            text=(
+                "Teach movements such as swipe, wave or circle. The app stores "
+                "only normalized landmark trajectories -- no video."
+            ),
+            wraplength=440,
+        ).grid(row=1, column=0, sticky="w", pady=(4, 10))
+
+        ttk.Label(panel, text="Dynamic gesture name").grid(
+            row=2, column=0, sticky="w"
+        )
+        self.dynamic_name_entry = ttk.Entry(
+            panel, textvariable=self.dynamic_name_var
+        )
+        self.dynamic_name_entry.grid(row=3, column=0, sticky="ew", pady=(3, 8))
+
+        self.dynamic_teach_button = ttk.Button(
+            panel,
+            text="Teach Dynamic Gesture",
+            command=self.start_dynamic_teaching,
+        )
+        self.dynamic_teach_button.grid(row=4, column=0, sticky="ew")
+
+        demo_controls = ttk.Frame(panel)
+        demo_controls.grid(row=5, column=0, sticky="ew", pady=(8, 0))
+        for column in range(3):
+            demo_controls.columnconfigure(column, weight=1)
+
+        self.dynamic_start_demo_button = ttk.Button(
+            demo_controls,
+            text="Start Demo",
+            command=self.start_dynamic_demo,
+            state="disabled",
+        )
+        self.dynamic_start_demo_button.grid(
+            row=0, column=0, sticky="ew", padx=(0, 4)
+        )
+
+        self.dynamic_stop_demo_button = ttk.Button(
+            demo_controls,
+            text="Stop Demo",
+            command=self.stop_dynamic_demo,
+            state="disabled",
+        )
+        self.dynamic_stop_demo_button.grid(
+            row=0, column=1, sticky="ew", padx=4
+        )
+
+        self.dynamic_cancel_button = ttk.Button(
+            demo_controls,
+            text="Cancel",
+            command=self.cancel_dynamic_teaching,
+            state="disabled",
+        )
+        self.dynamic_cancel_button.grid(
+            row=0, column=2, sticky="ew", padx=(4, 0)
+        )
+
+        ttk.Label(
+            panel,
+            textvariable=self.dynamic_demo_progress_var,
+        ).grid(row=6, column=0, sticky="w", pady=(8, 2))
+        ttk.Label(
+            panel,
+            textvariable=self.dynamic_status_var,
+            wraplength=440,
+        ).grid(row=7, column=0, sticky="w", pady=(0, 10))
+
+        self.dynamic_gesture_table = ttk.Treeview(
+            panel,
+            columns=("gesture", "templates", "threshold", "duration", "input"),
+            show="headings",
+            height=9,
+        )
+        dynamic_headings = {
+            "gesture": "Gesture",
+            "templates": "Demos",
+            "threshold": "Threshold",
+            "duration": "Median s",
+            "input": "Input",
+        }
+        dynamic_widths = {
+            "gesture": 130,
+            "templates": 60,
+            "threshold": 85,
+            "duration": 75,
+            "input": 70,
+        }
+        for column, heading in dynamic_headings.items():
+            self.dynamic_gesture_table.heading(column, text=heading)
+            self.dynamic_gesture_table.column(
+                column,
+                width=dynamic_widths[column],
+                anchor="w" if column == "gesture" else "center",
+            )
+        self.dynamic_gesture_table.grid(row=8, column=0, sticky="nsew")
+
+        management = ttk.LabelFrame(
+            panel, text="Dynamic Gesture Management", padding=10
+        )
+        management.grid(row=9, column=0, sticky="ew", pady=(10, 0))
+        for column in range(3):
+            management.columnconfigure(column, weight=1)
+
+        ttk.Button(
+            management,
+            text="Rename",
+            command=self.rename_selected_dynamic_gesture,
+        ).grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        ttk.Button(
+            management,
+            text="Delete",
+            command=self.delete_selected_dynamic_gesture,
+        ).grid(row=0, column=1, sticky="ew", padx=4)
+        ttk.Button(
+            management,
+            text="Clear All",
+            command=self.clear_all_dynamic_gestures,
+        ).grid(row=0, column=2, sticky="ew", padx=(4, 0))
+
+        ttk.Label(
+            panel,
+            text=(
+                "Training: press Start Demo, perform the complete movement once, "
+                "then Stop Demo. Repeat three times. Live recognition starts "
+                "automatically after learning and uses motion onset/offset detection."
+            ),
+            wraplength=440,
+        ).grid(row=10, column=0, sticky="w", pady=(10, 0))
+
     def add_stat_row(self, parent, row, label, variable):
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=2)
         ttk.Label(parent, textvariable=variable).grid(
@@ -436,6 +688,17 @@ class InteractiveGestureApp:
         except Exception as error:
             self.status_var.set(
                 "Warning: learning succeeded but gesture memory could not be "
+                f"saved: {error}"
+            )
+            return False
+
+    def save_dynamic_gesture_memory(self):
+        try:
+            self.dynamic_gesture_store.save(self.dynamic_learner)
+            return True
+        except Exception as error:
+            self.dynamic_status_var.set(
+                "Warning: dynamic learning succeeded but memory could not be "
                 f"saved: {error}"
             )
             return False
@@ -473,6 +736,9 @@ class InteractiveGestureApp:
 
         try:
             gesture = self.learner.rename_gesture(name, new_name)
+            self.prediction_stabilizer.reset()
+            self.current_prediction = None
+            self.current_raw_prediction = None
             self.save_gesture_memory()
             self.refresh_gesture_table()
             self.status_var.set(f"✓ Renamed '{name}' to '{gesture.name}'.")
@@ -492,6 +758,9 @@ class InteractiveGestureApp:
             return
 
         self.learner.delete_gesture(name)
+        self.prediction_stabilizer.reset()
+        self.current_prediction = None
+        self.current_raw_prediction = None
         self.save_gesture_memory()
         self.refresh_gesture_table()
         self.status_var.set(f"Deleted '{name}'.")
@@ -509,6 +778,9 @@ class InteractiveGestureApp:
             return
 
         self.learner.clear()
+        self.prediction_stabilizer.reset()
+        self.current_prediction = None
+        self.current_raw_prediction = None
         self.save_gesture_memory()
         self.refresh_gesture_table()
         self.status_var.set("All gesture memory cleared.")
@@ -564,8 +836,16 @@ class InteractiveGestureApp:
     def begin_teaching(self, name, mode, required_signature):
         if self.teaching:
             return
+        if self.dynamic_teaching:
+            self.status_var.set(
+                "Finish or cancel dynamic-gesture teaching first."
+            )
+            return
 
         self.finish_feedback()
+        self.prediction_stabilizer.reset()
+        self.current_prediction = None
+        self.current_raw_prediction = None
         self.selector = SmartSampleSelector()
         self.progress["maximum"] = self.selector.target_samples
 
@@ -728,6 +1008,9 @@ class InteractiveGestureApp:
         self.required_teaching_signature = None
         self.prepare_until = None
         self.selector = None
+        self.prediction_stabilizer.reset()
+        self.current_prediction = None
+        self.current_raw_prediction = None
         self.progress["value"] = 0
 
         self.teach_button.config(state="normal")
@@ -739,38 +1022,426 @@ class InteractiveGestureApp:
         self.gesture_entry.focus_set()
 
     # ========================================================
+    # Dynamic gesture learning / management
+    # ========================================================
+
+    def start_dynamic_teaching(self):
+        if self.teaching:
+            self.dynamic_status_var.set(
+                "Finish or cancel static-gesture teaching first."
+            )
+            return
+        if self.dynamic_teaching:
+            return
+
+        name = self.dynamic_name_var.get().strip()
+        if not name:
+            self.dynamic_status_var.set("Enter a dynamic gesture name first.")
+            self.dynamic_name_entry.focus_set()
+            return
+        if name in self.dynamic_learner.gestures:
+            self.dynamic_status_var.set(
+                f"Dynamic gesture '{name}' already exists."
+            )
+            return
+
+        self.dynamic_teaching = True
+        self.dynamic_demo_recording = False
+        self.dynamic_teaching_name = name
+        self.dynamic_required_signature = None
+        self.dynamic_demo_observations = []
+        self.dynamic_templates = []
+        self.motion_segmenter.reset()
+        self.dynamic_demo_progress_var.set(
+            f"Demonstrations: 0/{self.dynamic_target_demos}"
+        )
+
+        self.dynamic_name_entry.config(state="disabled")
+        self.dynamic_teach_button.config(state="disabled")
+        self.dynamic_start_demo_button.config(state="normal")
+        self.dynamic_stop_demo_button.config(state="disabled")
+        self.dynamic_cancel_button.config(state="normal")
+        self.dynamic_status_var.set(
+            f"Ready to teach '{name}'. Press Start Demo, perform the entire "
+            "movement once, then press Stop Demo."
+        )
+
+    def start_dynamic_demo(self):
+        if not self.dynamic_teaching or self.dynamic_demo_recording:
+            return
+        if not self.current_hands:
+            self.dynamic_status_var.set(
+                "Show the hand(s) you will use before starting the demo."
+            )
+            return
+
+        now = time.monotonic()
+        observation = build_dynamic_observation(self.current_hands, now)
+        if observation is None:
+            self.dynamic_status_var.set("No stable hand configuration detected.")
+            return
+
+        if self.dynamic_required_signature is None:
+            self.dynamic_required_signature = observation.hand_signature
+        elif observation.hand_signature != self.dynamic_required_signature:
+            self.dynamic_status_var.set(
+                f"This gesture is locked to {self.dynamic_required_signature} input. "
+                f"Currently seeing {observation.hand_signature}."
+            )
+            return
+
+        self.dynamic_demo_recording = True
+        self.dynamic_demo_observations = [observation]
+        self.last_dynamic_sample_time = now
+        demo_number = len(self.dynamic_templates) + 1
+        self.dynamic_start_demo_button.config(state="disabled")
+        self.dynamic_stop_demo_button.config(state="normal")
+        self.dynamic_status_var.set(
+            f"● Recording demo {demo_number}/{self.dynamic_target_demos}. "
+            "Perform the complete movement naturally, then press Stop Demo."
+        )
+
+    def process_dynamic_training_frame(self, now):
+        if not self.dynamic_demo_recording:
+            return
+        if now - self.last_dynamic_sample_time < self.dynamic_sample_interval:
+            return
+        self.last_dynamic_sample_time = now
+
+        observation = build_dynamic_observation(self.current_hands, now)
+        if observation is None:
+            self.dynamic_status_var.set(
+                "Recording: keep the hand(s) visible. Missing frames are ignored."
+            )
+            return
+        if observation.hand_signature != self.dynamic_required_signature:
+            self.dynamic_status_var.set(
+                f"Recording expects {self.dynamic_required_signature} input. "
+                "Keep the same hand configuration visible."
+            )
+            return
+
+        self.dynamic_demo_observations.append(observation)
+
+    def stop_dynamic_demo(self):
+        if not self.dynamic_teaching or not self.dynamic_demo_recording:
+            return
+
+        self.dynamic_demo_recording = False
+        self.dynamic_stop_demo_button.config(state="disabled")
+        self.dynamic_start_demo_button.config(state="normal")
+
+        try:
+            trajectory = prepare_dynamic_trajectory(
+                self.dynamic_demo_observations
+            )
+        except Exception as error:
+            self.dynamic_demo_observations = []
+            self.dynamic_status_var.set(
+                f"Demo was not accepted: {error} Please record this demo again."
+            )
+            return
+
+        self.dynamic_templates.append(trajectory)
+        self.dynamic_demo_observations = []
+        completed = len(self.dynamic_templates)
+        self.dynamic_demo_progress_var.set(
+            f"Demonstrations: {completed}/{self.dynamic_target_demos}"
+        )
+
+        if completed < self.dynamic_target_demos:
+            self.dynamic_status_var.set(
+                f"✓ Demo {completed} accepted "
+                f"({trajectory.duration_seconds:.2f}s, "
+                f"motion extent {trajectory.motion_extent:.2f}). "
+                "Return to the starting pose and record the next demonstration."
+            )
+            return
+
+        try:
+            gesture = self.dynamic_learner.learn_gesture(
+                self.dynamic_teaching_name,
+                self.dynamic_templates,
+            )
+            saved = self.save_dynamic_gesture_memory()
+        except Exception as error:
+            self.dynamic_status_var.set(f"Dynamic learning failed: {error}")
+            return
+
+        message = (
+            f"✓ Learned dynamic gesture '{gesture.name}' from "
+            f"{gesture.template_count} demonstrations. "
+            f"DTW threshold: {gesture.threshold:.4f}."
+        )
+        if saved:
+            message += " Landmark trajectories saved."
+
+        self.finish_dynamic_teaching_state()
+        self.refresh_dynamic_gesture_table()
+        self.dynamic_status_var.set(message)
+
+    def cancel_dynamic_teaching(self):
+        if not self.dynamic_teaching:
+            return
+        self.finish_dynamic_teaching_state()
+        self.dynamic_status_var.set("Dynamic gesture teaching cancelled.")
+
+    def finish_dynamic_teaching_state(self):
+        self.dynamic_teaching = False
+        self.dynamic_demo_recording = False
+        self.dynamic_teaching_name = None
+        self.dynamic_required_signature = None
+        self.dynamic_demo_observations = []
+        self.dynamic_templates = []
+        self.motion_segmenter.reset()
+
+        self.dynamic_name_entry.config(state="normal")
+        self.dynamic_teach_button.config(state="normal")
+        self.dynamic_start_demo_button.config(state="disabled")
+        self.dynamic_stop_demo_button.config(state="disabled")
+        self.dynamic_cancel_button.config(state="disabled")
+        self.dynamic_name_var.set("")
+        self.dynamic_demo_progress_var.set(
+            f"Demonstrations: 0/{self.dynamic_target_demos}"
+        )
+
+    def get_selected_dynamic_gesture_name(self):
+        selection = self.dynamic_gesture_table.selection()
+        if not selection:
+            messagebox.showinfo(
+                "Select Dynamic Gesture",
+                "Select a gesture in the Dynamic Gestures table first.",
+                parent=self.root,
+            )
+            return None
+        values = self.dynamic_gesture_table.item(selection[0], "values")
+        return values[0] if values else None
+
+    def rename_selected_dynamic_gesture(self):
+        name = self.get_selected_dynamic_gesture_name()
+        if not name:
+            return
+        new_name = simpledialog.askstring(
+            "Rename Dynamic Gesture",
+            f"New name for '{name}':",
+            initialvalue=name,
+            parent=self.root,
+        )
+        if new_name is None:
+            return
+        try:
+            gesture = self.dynamic_learner.rename_gesture(name, new_name)
+            self.save_dynamic_gesture_memory()
+            self.refresh_dynamic_gesture_table()
+            self.dynamic_status_var.set(
+                f"✓ Renamed dynamic gesture '{name}' to '{gesture.name}'."
+            )
+        except Exception as error:
+            messagebox.showerror("Rename Failed", str(error), parent=self.root)
+
+    def delete_selected_dynamic_gesture(self):
+        name = self.get_selected_dynamic_gesture_name()
+        if not name:
+            return
+        if not messagebox.askyesno(
+            "Delete Dynamic Gesture",
+            f"Delete '{name}' and all of its stored landmark trajectories?",
+            parent=self.root,
+        ):
+            return
+        try:
+            self.dynamic_learner.delete_gesture(name)
+            self.save_dynamic_gesture_memory()
+            self.refresh_dynamic_gesture_table()
+            self.motion_segmenter.reset()
+            self.dynamic_status_var.set(f"Deleted dynamic gesture '{name}'.")
+        except Exception as error:
+            messagebox.showerror("Delete Failed", str(error), parent=self.root)
+
+    def clear_all_dynamic_gestures(self):
+        if not self.dynamic_learner.gestures:
+            self.dynamic_status_var.set("There are no dynamic gestures to clear.")
+            return
+        if not messagebox.askyesno(
+            "Clear Dynamic Gesture Memory",
+            "Delete ALL learned dynamic gestures and trajectories?",
+            parent=self.root,
+        ):
+            return
+        self.dynamic_learner.clear()
+        self.save_dynamic_gesture_memory()
+        self.refresh_dynamic_gesture_table()
+        self.motion_segmenter.reset()
+        self.dynamic_prediction_var.set("—")
+        self.dynamic_distance_var.set("Distance: —\nConfidence index: —")
+        self.dynamic_status_var.set("All dynamic gesture memory cleared.")
+
+    def process_dynamic_runtime(self, now):
+        # Explicit training owns the temporal stream while a demo is recorded.
+        if self.dynamic_teaching:
+            self.motion_segmenter.reset()
+            self.process_dynamic_training_frame(now)
+            self.dynamic_runtime_state_var.set(
+                "Dynamic: RECORDING DEMO"
+                if self.dynamic_demo_recording
+                else "Dynamic: TEACHING"
+            )
+            return
+
+        # Do not let static teaching movements accidentally become dynamic
+        # recognition segments.
+        if self.teaching:
+            self.motion_segmenter.reset()
+            self.dynamic_runtime_state_var.set("Dynamic: PAUSED DURING STATIC TEACHING")
+            return
+
+        if now - self.last_dynamic_sample_time < self.dynamic_sample_interval:
+            if now >= self.dynamic_prediction_hold_until and self.motion_segmenter.state == self.motion_segmenter.IDLE:
+                self.dynamic_prediction_var.set("—")
+                self.dynamic_distance_var.set("Distance: —\nConfidence index: —")
+            return
+
+        self.last_dynamic_sample_time = now
+
+        if not self.dynamic_learner.gestures:
+            self.motion_segmenter.reset()
+            self.dynamic_runtime_state_var.set("Dynamic: no gestures learned")
+            return
+
+        observation = build_dynamic_observation(self.current_hands, now)
+        result = self.motion_segmenter.update(observation, now)
+        self.dynamic_runtime_state_var.set(f"Dynamic: {result.state}")
+
+        if result.completed is None:
+            if now >= self.dynamic_prediction_hold_until and result.state == self.motion_segmenter.IDLE:
+                self.dynamic_prediction_var.set("—")
+                self.dynamic_distance_var.set("Distance: —\nConfidence index: —")
+            return
+
+        try:
+            trajectory = prepare_dynamic_trajectory(result.completed)
+        except Exception:
+            self.motion_segmenter.set_cooldown(now, seconds=0.35)
+            return
+
+        prediction = self.dynamic_learner.predict(trajectory)
+        self.dynamic_prediction_hold_until = now + (2.0 if prediction.accepted else 1.0)
+
+        if prediction.accepted:
+            self.dynamic_prediction_var.set(prediction.label)
+            confidence_text = (
+                f"Confidence index: {prediction.confidence * 100.0:.0f}% "
+                "(not probability)"
+                if prediction.confidence is not None
+                else "Confidence index: —"
+            )
+            self.dynamic_distance_var.set(
+                f"DTW distance: {prediction.distance:.4f} / "
+                f"threshold {prediction.threshold:.4f}\n"
+                + confidence_text
+            )
+            self.dynamic_status_var.set(
+                f"✓ Dynamic gesture recognized: '{prediction.label}'."
+            )
+        else:
+            self.dynamic_prediction_var.set("UNKNOWN")
+            if prediction.distance is None:
+                self.dynamic_distance_var.set("Distance: —\nConfidence index: —")
+            else:
+                confidence_text = (
+                    f"Confidence index: {prediction.confidence * 100.0:.0f}% "
+                    "(not probability)"
+                    if prediction.confidence is not None
+                    else "Confidence index: —"
+                )
+                self.dynamic_distance_var.set(
+                    f"Nearest DTW distance: {prediction.distance:.4f}\n"
+                    + confidence_text
+                )
+
+        self.motion_segmenter.set_cooldown(now, seconds=0.65)
+
+    def refresh_dynamic_gesture_table(self):
+        if not hasattr(self, "dynamic_gesture_table"):
+            return
+        for item in self.dynamic_gesture_table.get_children():
+            self.dynamic_gesture_table.delete(item)
+        for name, gesture in self.dynamic_learner.gestures.items():
+            self.dynamic_gesture_table.insert(
+                "",
+                "end",
+                values=(
+                    name,
+                    gesture.template_count,
+                    f"{gesture.threshold:.4f}",
+                    f"{gesture.median_duration:.2f}",
+                    gesture.hand_signature,
+                ),
+            )
+
+    # ========================================================
     # Prediction
     # ========================================================
 
     def update_prediction(self):
         if self.teaching:
+            self.prediction_stabilizer.reset()
+            self.current_prediction = None
+            self.current_raw_prediction = None
             self.prediction_var.set(f"Teaching: {self.teaching_name}")
             self.distance_var.set("Distance: —")
             self.threshold_var.set("Threshold: —")
-            self.relative_distance_var.set("Relative distance: —")
+            self.relative_distance_var.set("Relative score: —\nConfidence index: —")
             self.rejection_reason_var.set("")
             return
 
         if self.current_features is None:
+            self.prediction_stabilizer.reset()
             self.current_prediction = None
+            self.current_raw_prediction = None
             self.prediction_var.set("NO HAND")
             self.distance_var.set("Distance: —")
             self.threshold_var.set("Threshold: —")
-            self.relative_distance_var.set("Relative distance: —")
+            self.relative_distance_var.set("Relative score: —\nConfidence index: —")
             self.rejection_reason_var.set("")
             return
 
-        prediction = self.learner.predict(
+        raw_prediction = self.learner.predict(
             self.current_features,
             hand_signature=self.current_hand_signature,
         )
+        self.current_raw_prediction = raw_prediction
+
+        stabilized = self.prediction_stabilizer.update(raw_prediction)
+        prediction = stabilized.prediction
         self.current_prediction = prediction
+
+        # ----------------------------------------------------
+        # Initial confirmation period. Do not expose a gesture
+        # as confirmed until it has stayed consistent briefly.
+        # ----------------------------------------------------
+        if prediction is None:
+            self.prediction_var.set("STABILIZING")
+            self.distance_var.set("Distance: —")
+            self.threshold_var.set("Threshold: —")
+            self.relative_distance_var.set("Relative score: —\nConfidence index: —")
+
+            candidate = stabilized.candidate_label or "prediction"
+            self.rejection_reason_var.set(
+                f"Checking '{candidate}' "
+                f"({stabilized.candidate_count}/{stabilized.required_count})"
+            )
+            return
+
+        # The visible label and feedback target are now always the SAME
+        # confirmed prediction object. This prevents feedback from being
+        # applied to a transient raw label that the user never saw.
         self.prediction_var.set(prediction.label)
 
         if prediction.distance is None:
             self.distance_var.set("Distance: —")
             self.threshold_var.set("Threshold: —")
-            self.relative_distance_var.set("Relative distance: —")
+            self.relative_distance_var.set("Relative score: —\nConfidence index: —")
         else:
             self.distance_var.set(
                 f"Nearest positive distance: {prediction.distance:.4f}"
@@ -778,11 +1449,31 @@ class InteractiveGestureApp:
             self.threshold_var.set(
                 f"Acceptance threshold: {prediction.threshold:.4f}"
             )
-            self.relative_distance_var.set(
+            relative_text = (
                 f"Relative score: {prediction.relative_distance:.2f}x"
                 if prediction.relative_distance is not None
                 else "Relative score: —"
             )
+            confidence_text = (
+                f"Confidence index: {prediction.confidence * 100.0:.0f}% "
+                "(not probability)"
+                if prediction.confidence is not None
+                else "Confidence index: —"
+            )
+            self.relative_distance_var.set(
+                relative_text + "\n" + confidence_text
+            )
+
+        # A different raw candidate may be present, but the confirmed label is
+        # deliberately held until that candidate persists for the required
+        # number of recognition updates.
+        if stabilized.pending:
+            candidate = stabilized.candidate_label or "prediction"
+            self.rejection_reason_var.set(
+                f"Holding '{prediction.label}' — checking '{candidate}' "
+                f"({stabilized.candidate_count}/{stabilized.required_count})"
+            )
+            return
 
         if prediction.accepted:
             self.rejection_reason_var.set("")
@@ -1095,6 +1786,11 @@ class InteractiveGestureApp:
                 self.update_prediction()
                 self.last_prediction_update = now
 
+            # Dynamic recognition uses a fixed-rate landmark stream and only
+            # runs DTW after a motion segment completes, keeping the preview
+            # responsive and leaving static recognition untouched.
+            self.process_dynamic_runtime(now)
+
             display_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             image = Image.fromarray(display_frame)
             image.thumbnail((850, 650))
@@ -1110,6 +1806,7 @@ class InteractiveGestureApp:
 
     def close(self):
         self.save_gesture_memory()
+        self.save_dynamic_gesture_memory()
         if self.cap is not None and self.cap.isOpened():
             self.cap.release()
         self.tracker.close()

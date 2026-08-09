@@ -9,6 +9,12 @@ from adaptive_gesture.features.similarity import (
     feature_distance,
 )
 
+from adaptive_gesture.learning.confidence import (
+    accepted_confidence,
+    hard_negative_confidence,
+    outside_region_confidence,
+)
+
 
 @dataclass
 class PrototypeCluster:
@@ -57,6 +63,9 @@ class Prediction:
     relative_distance: float | None = None
     threshold: float | None = None
     hard_negative_distance: float | None = None
+    second_best_label: str | None = None
+    second_best_relative_distance: float | None = None
+    confidence: float | None = None
     rejection_reason: str | None = None
 
 
@@ -528,8 +537,17 @@ class OnlineGestureLearner:
                 rejection_reason="hand_configuration",
             )
 
-        best = min(candidates, key=lambda item: item["score"])
+        candidates.sort(key=lambda item: item["score"])
+        best = candidates[0]
         gesture = best["gesture"]
+
+        second_best_label = None
+        second_best_relative_distance = None
+        if len(candidates) > 1:
+            second = candidates[1]
+            second_best_label = second["gesture"].name
+            second_best_relative_distance = float(second["score"])
+
         accepted = best["score"] <= 1.0
         reason = None if accepted else "outside_positive_region"
 
@@ -542,6 +560,22 @@ class OnlineGestureLearner:
             accepted = False
             reason = "hard_negative"
 
+        if accepted:
+            confidence_result = accepted_confidence(
+                relative_distance=best["score"],
+                second_best_relative_distance=second_best_relative_distance,
+                positive_distance=best["nearest_positive"],
+                hard_negative_distance=nearest_negative,
+            )
+        elif reason == "hard_negative":
+            confidence_result = hard_negative_confidence(
+                positive_distance=best["nearest_positive"],
+                hard_negative_distance=nearest_negative,
+                threshold=best["positive_threshold"],
+            )
+        else:
+            confidence_result = outside_region_confidence(best["score"])
+
         return Prediction(
             label=gesture.name if accepted else self.UNKNOWN_LABEL,
             accepted=accepted,
@@ -551,6 +585,9 @@ class OnlineGestureLearner:
             relative_distance=best["score"],
             threshold=best["positive_threshold"],
             hard_negative_distance=nearest_negative,
+            second_best_label=second_best_label,
+            second_best_relative_distance=second_best_relative_distance,
+            confidence=confidence_result.score,
             rejection_reason=reason,
         )
 
