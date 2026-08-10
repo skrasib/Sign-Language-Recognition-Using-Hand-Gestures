@@ -1,4 +1,5 @@
 from pathlib import Path
+import logging
 import sys
 import time
 import tkinter as tk
@@ -26,6 +27,10 @@ from adaptive_gesture.learning.sample_selector import SmartSampleSelector
 from adaptive_gesture.storage.dynamic_gesture_store import DynamicGestureStore
 from adaptive_gesture.storage.gesture_store import GestureStore
 from adaptive_gesture.tracking.hand_tracker import HandTracker
+from adaptive_gesture.utils.logging_config import configure_logging
+
+
+logger = logging.getLogger(__name__)
 
 
 class InteractiveGestureApp:
@@ -75,6 +80,7 @@ class InteractiveGestureApp:
         except Exception as error:
             self.restored_gestures = 0
             self.restore_error = str(error)
+            logger.exception("Failed to restore static gesture memory")
 
         # Dynamic gesture trajectories are stored separately from the existing
         # static memory. This avoids risky schema changes and stores landmarks
@@ -90,11 +96,14 @@ class InteractiveGestureApp:
         except Exception as error:
             self.restored_dynamic_gestures = 0
             self.dynamic_restore_error = str(error)
+            logger.exception("Failed to restore dynamic gesture memory")
 
         # Camera.
         self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
         if not self.cap.isOpened():
+            logger.error("Could not open webcam device 0 using CAP_DSHOW")
             raise RuntimeError("Could not open webcam.")
+        logger.info("Webcam opened successfully")
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 960)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 540)
 
@@ -1116,6 +1125,7 @@ class InteractiveGestureApp:
             self.gesture_store.save(self.learner)
             return True
         except Exception as error:
+            logger.exception("Failed to save static gesture memory")
             self.status_var.set(
                 "Warning: learning succeeded but gesture memory could not be "
                 f"saved: {error}"
@@ -1127,6 +1137,7 @@ class InteractiveGestureApp:
             self.dynamic_gesture_store.save(self.dynamic_learner)
             return True
         except Exception as error:
+            logger.exception("Failed to save dynamic gesture memory")
             self.dynamic_status_var.set(
                 "Warning: dynamic learning succeeded but memory could not be "
                 f"saved: {error}"
@@ -1753,6 +1764,7 @@ class InteractiveGestureApp:
         try:
             trajectory = prepare_dynamic_trajectory(result.completed)
         except Exception:
+            logger.debug("Discarded invalid dynamic motion segment", exc_info=True)
             self.motion_segmenter.set_cooldown(now, seconds=0.35)
             return
 
@@ -2237,6 +2249,7 @@ class InteractiveGestureApp:
     # ========================================================
 
     def close(self):
+        logger.info("Application shutdown requested")
         self.save_gesture_memory()
         self.save_dynamic_gesture_memory()
         if self.cap is not None and self.cap.isOpened():
@@ -2247,9 +2260,21 @@ class InteractiveGestureApp:
 
 
 def main():
+    log_path = configure_logging(PROJECT_ROOT / "logs")
+    logger.info("Starting Adaptive Real-Time Hand Gesture Recognition")
+    logger.info("Log file: %s", log_path)
+
     root = tk.Tk()
-    InteractiveGestureApp(root)
-    root.mainloop()
+    try:
+        InteractiveGestureApp(root)
+        root.mainloop()
+    except Exception:
+        logger.exception("Fatal application error")
+        try:
+            root.destroy()
+        except tk.TclError:
+            pass
+        raise
 
 
 if __name__ == "__main__":
