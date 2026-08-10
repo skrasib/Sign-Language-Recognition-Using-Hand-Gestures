@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 class InteractiveGestureApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Adaptive Real-Time Hand Gesture Recognition — V3.3 Geometry + EVT + Metric Embedding")
+        self.root.title("Adaptive Real-Time Hand Gesture Recognition — V3.4 Geometry + EVT + Metric + Diverse Memory")
         self.root.geometry("1450x900")
         self.root.minsize(1150, 760)
 
@@ -97,6 +97,13 @@ class InteractiveGestureApp:
             evt_min_negatives=3,
             inclusion_threshold=0.35,
             top_k_inclusion=1,
+            exemplar_memory_strategy="diversity",
+            hard_negative_memory_strategy="boundary_diversity",
+        )
+        logger.info(
+            "V3.4 exemplar memory active: positives=%s hard_negatives=%s",
+            self.learner.exemplar_memory_strategy,
+            self.learner.hard_negative_memory_strategy,
         )
         self.selector = None
 
@@ -1004,7 +1011,10 @@ class InteractiveGestureApp:
         ).grid(row=2, column=0, sticky="ew", pady=(8, 0))
         ttk.Label(
             management,
-            text="P = adaptive prototypes. +/− = positive and hard-negative examples.",
+            text=(
+                "P = adaptive prototypes. +/− = positive and hard-negative examples. "
+                "V3.4 keeps a diversity-aware bounded exemplar memory."
+            ),
             style="CardMuted.TLabel",
         ).grid(row=3, column=0, sticky="w", pady=(8, 0))
 
@@ -2438,7 +2448,7 @@ class InteractiveGestureApp:
 
 def main():
     log_path = configure_logging(PROJECT_ROOT / "logs")
-    logger.info("Starting Adaptive Real-Time Hand Gesture Recognition V3.3")
+    logger.info("Starting Adaptive Real-Time Hand Gesture Recognition V3.4")
     logger.info("Log file: %s", log_path)
 
     root = tk.Tk()

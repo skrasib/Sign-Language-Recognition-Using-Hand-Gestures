@@ -14,6 +14,10 @@ from adaptive_gesture.learning.confidence import (
     hard_negative_confidence,
     outside_region_confidence,
 )
+from adaptive_gesture.learning.exemplar_memory import (
+    select_boundary_diverse_negatives,
+    select_diverse_exemplars,
+)
 
 
 @dataclass
@@ -90,6 +94,8 @@ class OnlineGestureLearner:
         max_prototypes: int = 3,
         feedback_duplicate_threshold: float = 0.012,
         hard_negative_margin: float = 1.05,
+        exemplar_memory_strategy: str = "diversity",
+        hard_negative_memory_strategy: str = "boundary_diversity",
     ):
         self.gestures: dict[str, GestureClass] = {}
         self.radius_multiplier = radius_multiplier
@@ -99,6 +105,19 @@ class OnlineGestureLearner:
         self.max_prototypes = max_prototypes
         self.feedback_duplicate_threshold = feedback_duplicate_threshold
         self.hard_negative_margin = hard_negative_margin
+
+        valid_positive_memory = {"diversity", "fifo"}
+        if exemplar_memory_strategy not in valid_positive_memory:
+            raise ValueError(
+                "exemplar_memory_strategy must be 'diversity' or 'fifo'."
+            )
+        valid_negative_memory = {"boundary_diversity", "fifo"}
+        if hard_negative_memory_strategy not in valid_negative_memory:
+            raise ValueError(
+                "hard_negative_memory_strategy must be 'boundary_diversity' or 'fifo'."
+            )
+        self.exemplar_memory_strategy = exemplar_memory_strategy
+        self.hard_negative_memory_strategy = hard_negative_memory_strategy
 
     # =====================================================
     # Validation / helpers
@@ -219,6 +238,45 @@ class OnlineGestureLearner:
             if feature_distance(positive_sample, negative) >= threshold
         ]
 
+    def _bound_positive_memory(
+        self,
+        gesture: GestureClass,
+        max_samples: int,
+    ) -> None:
+        """Apply the configured bounded-memory policy to positive exemplars."""
+        max_samples = max(1, int(max_samples))
+        if len(gesture.samples) <= max_samples:
+            return
+
+        if self.exemplar_memory_strategy == "fifo":
+            gesture.samples = gesture.samples[-max_samples:]
+            return
+
+        gesture.samples, _ = select_diverse_exemplars(
+            gesture.samples,
+            budget=max_samples,
+        )
+
+    def _bound_hard_negative_memory(
+        self,
+        gesture: GestureClass,
+        max_negatives: int,
+    ) -> None:
+        """Keep bounded negative evidence with boundary relevance + diversity."""
+        max_negatives = max(1, int(max_negatives))
+        if len(gesture.hard_negatives) <= max_negatives:
+            return
+
+        if self.hard_negative_memory_strategy == "fifo":
+            gesture.hard_negatives = gesture.hard_negatives[-max_negatives:]
+            return
+
+        gesture.hard_negatives, _ = select_boundary_diverse_negatives(
+            gesture.hard_negatives,
+            positive_samples=gesture.samples,
+            budget=max_negatives,
+        )
+
     # =====================================================
     # New class / class management
     # =====================================================
@@ -307,8 +365,7 @@ class OnlineGestureLearner:
                     self.feedback_duplicate_threshold,
                 )
 
-        if len(gesture.samples) > max_samples:
-            gesture.samples = gesture.samples[-max_samples:]
+        self._bound_positive_memory(gesture, max_samples)
 
         self._rebuild_gesture(gesture)
         return gesture
@@ -373,8 +430,7 @@ class OnlineGestureLearner:
             self.feedback_duplicate_threshold,
         )
 
-        if len(gesture.samples) > max_samples:
-            gesture.samples.pop(0)
+        self._bound_positive_memory(gesture, max_samples)
 
         self._rebuild_gesture(gesture)
         return gesture
@@ -404,8 +460,7 @@ class OnlineGestureLearner:
                 return gesture
 
         gesture.hard_negatives.append(sample)
-        if len(gesture.hard_negatives) > max_negatives:
-            gesture.hard_negatives.pop(0)
+        self._bound_hard_negative_memory(gesture, max_negatives)
 
         return gesture
 
