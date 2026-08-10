@@ -16,6 +16,7 @@ sys.path.insert(0, str(SRC_DIR))
 
 from adaptive_gesture.features.dynamic_features import (
     build_dynamic_observation,
+    observation_motion_score,
     prepare_dynamic_trajectory,
 )
 from adaptive_gesture.features.hand_features import build_frame_features
@@ -28,9 +29,18 @@ from adaptive_gesture.learning.metric_runtime import (
 )
 from adaptive_gesture.learning.prediction_stabilizer import PredictionStabilizer
 from adaptive_gesture.learning.sample_selector import SmartSampleSelector
+from adaptive_gesture.learning.teaching_flow import (
+    HandReadinessGate,
+    ONE_HAND_MODE,
+    TWO_HAND_MODE,
+    describe_hand_requirement,
+    hand_mode_from_signature,
+    required_hand_count,
+)
 from adaptive_gesture.storage.dynamic_gesture_store import DynamicGestureStore
 from adaptive_gesture.storage.gesture_store import GestureStore
 from adaptive_gesture.tracking.hand_tracker import HandTracker
+from adaptive_gesture.ui.layout import choose_window_layout, fit_size, responsive_profile
 from adaptive_gesture.utils.logging_config import configure_logging
 
 
@@ -40,9 +50,9 @@ logger = logging.getLogger(__name__)
 class InteractiveGestureApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Adaptive Real-Time Hand Gesture Recognition — V3.6 Geometry + EVT + Metric + Diverse Memory + Temporal Prototypes + Async Tasks")
-        self.root.geometry("1450x900")
-        self.root.minsize(1150, 760)
+        self.root.title("Adaptive Real-Time Hand Gesture Recognition — V3.6.3 Responsive UI")
+        self._resize_after_id = None
+        self._last_responsive_profile = None
 
         # V3.6 tracking backend. MediaPipe Tasks LIVE_STREAM performs landmark
         # inference asynchronously, while the existing temporal stabilization layer
@@ -220,21 +230,35 @@ class InteractiveGestureApp:
         self.prediction_update_interval = 0.08
         self.last_prediction_update = 0.0
 
-        # Teaching state.
+        # Static teaching state.  V3.6.2 makes teaching hand-count aware: the
+        # user chooses one or two hands before starting, and Smart Capture stays
+        # armed until that exact configuration has been stable for several fresh
+        # asynchronous tracker results.
         self.teaching = False
         self.teaching_mode = None  # new | improve | retrain
         self.teaching_name = None
         self.teaching_signature = None
         self.required_teaching_signature = None
+        self.teaching_required_hand_count = 1
+        self.teaching_phase = None  # WAITING_HANDS | COUNTDOWN | CAPTURING
+        self.teaching_readiness_gate = None
+        self.teaching_countdown_seconds = 1.5
         self.prepare_until = None
 
-        # Dynamic teaching/runtime state. Training uses explicit Start/Stop Demo
-        # controls for clean few-shot examples; recognition uses automatic
-        # motion onset/offset segmentation.
+        # Dynamic teaching/runtime state.  Teaching is fully hands-free after
+        # the initial button press: required hands -> still start pose -> motion
+        # onset -> motion offset -> accepted demo -> automatically arm next demo.
         self.dynamic_teaching = False
         self.dynamic_demo_recording = False
         self.dynamic_teaching_name = None
         self.dynamic_required_signature = None
+        self.dynamic_required_hand_count = 1
+        self.dynamic_teaching_phase = None
+        self.dynamic_readiness_gate = None
+        self.dynamic_training_segmenter = MotionSegmenter()
+        self.dynamic_previous_ready_observation = None
+        self.dynamic_next_arm_time = 0.0
+        self.dynamic_inter_demo_delay = 0.75
         self.dynamic_demo_observations = []
         self.dynamic_templates = []
         self.dynamic_target_demos = self.dynamic_learner.minimum_templates
@@ -251,6 +275,8 @@ class InteractiveGestureApp:
 
         # Tk variables.
         self.gesture_name_var = tk.StringVar()
+        self.static_hand_mode_var = tk.StringVar(value=ONE_HAND_MODE)
+        self.teaching_state_var = tk.StringVar(value="● IDLE")
         self.prediction_var = tk.StringVar(value="UNKNOWN")
         self.distance_var = tk.StringVar(value="Distance: —")
         self.threshold_var = tk.StringVar(value="Threshold: —")
@@ -270,6 +296,8 @@ class InteractiveGestureApp:
 
         # Dynamic gesture UI state.
         self.dynamic_name_var = tk.StringVar()
+        self.dynamic_hand_mode_var = tk.StringVar(value=ONE_HAND_MODE)
+        self.dynamic_teaching_state_var = tk.StringVar(value="● IDLE")
         self.dynamic_prediction_var = tk.StringVar(value="—")
         self.dynamic_distance_var = tk.StringVar(value="Distance: —\nConfidence index: —")
         self.dynamic_runtime_state_var = tk.StringVar(value="Dynamic: IDLE")
@@ -490,6 +518,19 @@ class InteractiveGestureApp:
         )
 
         style.configure(
+            "HandMode.TRadiobutton",
+            background=self.colors["card"],
+            foreground=self.colors["text"],
+            font=("Segoe UI", 9, "bold"),
+            padding=(4, 2),
+        )
+        style.map(
+            "HandMode.TRadiobutton",
+            background=[("active", self.colors["card"])],
+            foreground=[("disabled", self.colors["muted"])],
+        )
+
+        style.configure(
             "Modern.TEntry",
             fieldbackground=self.colors["card_alt"],
             foreground=self.colors["text"],
@@ -551,8 +592,12 @@ class InteractiveGestureApp:
 
     def build_ui(self):
         self.setup_styles()
-        self.root.geometry("1500x900")
-        self.root.minsize(1180, 760)
+        screen_layout = choose_window_layout(
+            self.root.winfo_screenwidth(),
+            self.root.winfo_screenheight(),
+        )
+        self.root.geometry(screen_layout.geometry)
+        self.root.minsize(screen_layout.min_width, screen_layout.min_height)
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(1, weight=1)
 
@@ -562,6 +607,7 @@ class InteractiveGestureApp:
         header = ttk.Frame(self.root, style="App.TFrame", padding=(22, 14, 22, 10))
         header.grid(row=0, column=0, sticky="ew")
         header.columnconfigure(0, weight=1)
+        self.header = header
 
         title_block = ttk.Frame(header, style="App.TFrame")
         title_block.grid(row=0, column=0, sticky="w")
@@ -582,6 +628,7 @@ class InteractiveGestureApp:
             style="Subtitle.TLabel",
         )
         privacy.grid(row=0, column=1, rowspan=2, sticky="e")
+        self.privacy_label = privacy
 
         # ----------------------------------------------------
         # Main body: persistent camera + navigable workspace
@@ -591,12 +638,14 @@ class InteractiveGestureApp:
         body.columnconfigure(0, weight=7, uniform="main")
         body.columnconfigure(1, weight=5, uniform="main")
         body.rowconfigure(0, weight=1)
+        self.body = body
 
         # Camera surface.
         camera_shell = ttk.Frame(body, style="Surface.TFrame", padding=12)
         camera_shell.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
         camera_shell.columnconfigure(0, weight=1)
         camera_shell.rowconfigure(1, weight=1)
+        self.camera_shell = camera_shell
 
         camera_header = ttk.Frame(camera_shell, style="Surface.TFrame")
         camera_header.grid(row=0, column=0, sticky="ew", pady=(0, 9))
@@ -612,23 +661,23 @@ class InteractiveGestureApp:
             style="CameraHeader.TLabel",
         ).grid(row=0, column=1, sticky="e")
 
-        camera_canvas = tk.Frame(
+        # A Canvas is used instead of an image Label so the PhotoImage does not
+        # dictate the requested widget size. This lets the camera region shrink
+        # and grow naturally when the window is restored, resized, or maximized.
+        self.camera_canvas = tk.Canvas(
             camera_shell,
             bg=self.colors["camera"],
             highlightthickness=1,
             highlightbackground=self.colors["border"],
-        )
-        camera_canvas.grid(row=1, column=0, sticky="nsew")
-        camera_canvas.rowconfigure(0, weight=1)
-        camera_canvas.columnconfigure(0, weight=1)
-
-        self.video_label = tk.Label(
-            camera_canvas,
-            bg=self.colors["camera"],
             bd=0,
+        )
+        self.camera_canvas.grid(row=1, column=0, sticky="nsew")
+        self.camera_image_item = self.camera_canvas.create_image(
+            0,
+            0,
             anchor="center",
         )
-        self.video_label.grid(row=0, column=0, sticky="nsew")
+        self.camera_photo = None
 
         camera_footer = ttk.Frame(camera_shell, style="Surface.TFrame")
         camera_footer.grid(row=2, column=0, sticky="ew", pady=(9, 0))
@@ -639,17 +688,19 @@ class InteractiveGestureApp:
             style="CameraStatus.TLabel",
         )
         self.tracking_label.grid(row=0, column=0, sticky="w")
-        ttk.Label(
+        self.camera_footer_note = ttk.Label(
             camera_footer,
             text="Camera frames stay in memory only",
             style="CameraHeader.TLabel",
-        ).grid(row=0, column=1, sticky="e")
+        )
+        self.camera_footer_note.grid(row=0, column=1, sticky="e")
 
         # Right workspace.
         workspace = ttk.Frame(body, style="Surface.TFrame", padding=12)
         workspace.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
         workspace.columnconfigure(0, weight=1)
         workspace.rowconfigure(1, weight=1)
+        self.workspace = workspace
 
         nav = ttk.Frame(workspace, style="Surface.TFrame")
         nav.grid(row=0, column=0, sticky="ew", pady=(0, 10))
@@ -679,12 +730,18 @@ class InteractiveGestureApp:
         self.page_container.columnconfigure(0, weight=1)
         self.page_container.rowconfigure(0, weight=1)
 
+        # Each page is hosted inside a vertically scrollable canvas. On taller
+        # windows the inner page expands to fill the available height; on laptop
+        # screens only the overflowing page content scrolls instead of being cut
+        # off below the window.
         self.pages = {}
+        self.page_hosts = {}
+        self.page_canvases = {}
+        self.page_scrollbars = {}
+        self.page_window_items = {}
+        self.current_page_name = None
         for name in ("Live", "Teach", "Library", "Dynamic", "Settings"):
-            page = ttk.Frame(self.page_container, style="App.TFrame")
-            page.grid(row=0, column=0, sticky="nsew")
-            page.columnconfigure(0, weight=1)
-            self.pages[name] = page
+            self._create_scrollable_page(name)
 
         self.build_live_tab(self.pages["Live"])
         self.build_teach_tab(self.pages["Teach"])
@@ -693,13 +750,217 @@ class InteractiveGestureApp:
         self.build_settings_tab(self.pages["Settings"])
         self.show_page("Live")
 
-    def show_page(self, name):
+        # Debounced resize handling keeps layout updates cheap while the user
+        # drags a window edge or switches between restored and maximized states.
+        self.root.bind("<Configure>", self._on_root_configure, add="+")
+        self.root.bind_all("<MouseWheel>", self._on_page_mousewheel, add="+")
+        self.root.after_idle(self._apply_responsive_layout)
+
+    def _create_scrollable_page(self, name):
+        host = ttk.Frame(self.page_container, style="App.TFrame")
+        host.grid(row=0, column=0, sticky="nsew")
+        host.columnconfigure(0, weight=1)
+        host.rowconfigure(0, weight=1)
+
+        canvas = tk.Canvas(
+            host,
+            bg=self.colors["bg"],
+            highlightthickness=0,
+            bd=0,
+        )
+        canvas.grid(row=0, column=0, sticky="nsew")
+
+        scrollbar = ttk.Scrollbar(host, orient="vertical", command=canvas.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        page = ttk.Frame(canvas, style="App.TFrame")
+        page.columnconfigure(0, weight=1)
+        window_item = canvas.create_window((0, 0), window=page, anchor="nw")
+
+        self.page_hosts[name] = host
+        self.page_canvases[name] = canvas
+        self.page_scrollbars[name] = scrollbar
+        self.page_window_items[name] = window_item
+        self.pages[name] = page
+
+        page.bind(
+            "<Configure>",
+            lambda _event, page_name=name: self._schedule_page_geometry_sync(page_name),
+            add="+",
+        )
+        canvas.bind(
+            "<Configure>",
+            lambda event, page_name=name: self._resize_page_window(page_name, event),
+            add="+",
+        )
+
+    def _schedule_page_geometry_sync(self, name):
+        self.root.after_idle(lambda page_name=name: self._sync_page_geometry(page_name))
+
+    def _resize_page_window(self, name, event):
+        page = self.pages[name]
+        canvas = self.page_canvases[name]
+        item = self.page_window_items[name]
+        requested_height = max(1, page.winfo_reqheight())
+        target_height = max(int(event.height), requested_height)
+        canvas.itemconfigure(
+            item,
+            width=max(1, int(event.width)),
+            height=target_height,
+        )
+        self._schedule_page_geometry_sync(name)
+
+    def _sync_page_geometry(self, name):
+        canvas = self.page_canvases.get(name)
         page = self.pages.get(name)
-        if page is None:
+        scrollbar = self.page_scrollbars.get(name)
+        item = self.page_window_items.get(name)
+        if canvas is None or page is None or scrollbar is None or item is None:
             return
-        page.tkraise()
+
+        canvas_width = max(1, canvas.winfo_width())
+        canvas_height = max(1, canvas.winfo_height())
+        requested_height = max(1, page.winfo_reqheight())
+        target_height = max(canvas_height, requested_height)
+        canvas.itemconfigure(item, width=canvas_width, height=target_height)
+        canvas.configure(scrollregion=(0, 0, canvas_width, target_height))
+
+        if requested_height > canvas_height + 2:
+            scrollbar.grid()
+        else:
+            scrollbar.grid_remove()
+            canvas.yview_moveto(0.0)
+
+    def _on_page_mousewheel(self, event):
+        if not self.current_page_name:
+            return None
+
+        widget_class = ""
+        try:
+            widget_class = event.widget.winfo_class()
+        except Exception:
+            pass
+        # Let controls with their own scrolling consume the wheel normally.
+        if widget_class in {"Treeview", "TCombobox", "Listbox", "Text"}:
+            return None
+
+        try:
+            pointer_x = self.root.winfo_pointerx()
+            pointer_y = self.root.winfo_pointery()
+            wx = self.workspace.winfo_rootx()
+            wy = self.workspace.winfo_rooty()
+            ww = self.workspace.winfo_width()
+            wh = self.workspace.winfo_height()
+            if not (wx <= pointer_x <= wx + ww and wy <= pointer_y <= wy + wh):
+                return None
+        except tk.TclError:
+            return None
+
+        canvas = self.page_canvases.get(self.current_page_name)
+        if canvas is None:
+            return None
+        bbox = canvas.cget("scrollregion")
+        if not bbox:
+            return None
+        units = int(-event.delta / 120) if event.delta else 0
+        if units:
+            canvas.yview_scroll(units, "units")
+            return "break"
+        return None
+
+    def show_page(self, name):
+        host = self.page_hosts.get(name)
+        if host is None:
+            return
+        self.current_page_name = name
+        host.tkraise()
+        self._schedule_page_geometry_sync(name)
         for key, button in self.nav_buttons.items():
             button.configure(style="NavActive.TButton" if key == name else "Nav.TButton")
+
+    def _on_root_configure(self, event):
+        if event.widget is not self.root:
+            return
+        if event.width < 200 or event.height < 200:
+            return
+        if self._resize_after_id is not None:
+            try:
+                self.root.after_cancel(self._resize_after_id)
+            except tk.TclError:
+                pass
+        self._resize_after_id = self.root.after(90, self._apply_responsive_layout)
+
+    def _apply_responsive_layout(self):
+        self._resize_after_id = None
+        width = max(1, self.root.winfo_width())
+        profile = responsive_profile(width)
+
+        self.body.configure(padding=profile.outer_padding)
+        self.body.columnconfigure(0, weight=profile.camera_weight, uniform="main")
+        self.body.columnconfigure(1, weight=profile.workspace_weight, uniform="main")
+        self.camera_shell.configure(padding=profile.inner_padding)
+        self.workspace.configure(padding=profile.inner_padding)
+        self.camera_shell.grid_configure(padx=(0, profile.column_gap))
+        self.workspace.grid_configure(padx=(profile.column_gap, 0))
+
+        if profile.hide_secondary_header:
+            self.privacy_label.grid_remove()
+            self.camera_footer_note.grid_remove()
+        else:
+            self.privacy_label.grid()
+            self.camera_footer_note.grid()
+
+        workspace_width = max(320, self.workspace.winfo_width())
+        wraplength = max(250, workspace_width - 70)
+        self._update_wrapped_labels(self.workspace, wraplength)
+
+        for name in self.pages:
+            self._sync_page_geometry(name)
+        self._last_responsive_profile = profile
+
+    def _update_wrapped_labels(self, parent, wraplength):
+        for widget in parent.winfo_children():
+            if isinstance(widget, ttk.Label):
+                try:
+                    current = int(float(widget.cget("wraplength")))
+                except (tk.TclError, TypeError, ValueError):
+                    current = 0
+                if current > 0:
+                    try:
+                        widget.configure(wraplength=wraplength)
+                    except tk.TclError:
+                        pass
+            self._update_wrapped_labels(widget, wraplength)
+
+    def _render_camera_frame(self, image):
+        canvas_width = max(1, self.camera_canvas.winfo_width() - 4)
+        canvas_height = max(1, self.camera_canvas.winfo_height() - 4)
+
+        # During the very first Tk layout pass the canvas can temporarily report
+        # 1x1. Use a modest fallback for that single frame; subsequent frames
+        # immediately adopt the true resized canvas dimensions.
+        if canvas_width < 20 or canvas_height < 20:
+            canvas_width, canvas_height = 640, 360
+
+        target_width, target_height = fit_size(
+            image.width,
+            image.height,
+            canvas_width,
+            canvas_height,
+        )
+        if (target_width, target_height) != image.size:
+            image = image.resize(
+                (target_width, target_height),
+                Image.Resampling.BILINEAR,
+            )
+
+        photo = ImageTk.PhotoImage(image=image)
+        self.camera_photo = photo
+        center_x = max(1, self.camera_canvas.winfo_width()) / 2
+        center_y = max(1, self.camera_canvas.winfo_height()) / 2
+        self.camera_canvas.itemconfigure(self.camera_image_item, image=photo)
+        self.camera_canvas.coords(self.camera_image_item, center_x, center_y)
 
     def _card(self, parent, row, pady=(0, 10)):
         card = ttk.Frame(parent, style="Card.TFrame", padding=16)
@@ -877,13 +1138,37 @@ class InteractiveGestureApp:
         self.gesture_entry.grid(row=1, column=0, sticky="ew", pady=(7, 10))
         self.gesture_entry.bind("<Return>", lambda event: self.start_new_teaching())
 
+        hand_mode = ttk.Frame(teach, style="Card.TFrame")
+        hand_mode.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        hand_mode.columnconfigure(1, weight=1)
+        hand_mode.columnconfigure(2, weight=1)
+        ttk.Label(hand_mode, text="HANDS", style="CardTitle.TLabel").grid(
+            row=0, column=0, sticky="w", padx=(0, 12)
+        )
+        self.static_one_hand_radio = ttk.Radiobutton(
+            hand_mode,
+            text="One hand",
+            variable=self.static_hand_mode_var,
+            value=ONE_HAND_MODE,
+            style="HandMode.TRadiobutton",
+        )
+        self.static_one_hand_radio.grid(row=0, column=1, sticky="w")
+        self.static_two_hand_radio = ttk.Radiobutton(
+            hand_mode,
+            text="Two hands",
+            variable=self.static_hand_mode_var,
+            value=TWO_HAND_MODE,
+            style="HandMode.TRadiobutton",
+        )
+        self.static_two_hand_radio.grid(row=0, column=2, sticky="w")
+
         teaching_buttons = ttk.Frame(teach, style="Card.TFrame")
-        teaching_buttons.grid(row=2, column=0, sticky="ew")
+        teaching_buttons.grid(row=3, column=0, sticky="ew")
         for column in range(3):
             teaching_buttons.columnconfigure(column, weight=1)
         self.teach_button = ttk.Button(
             teaching_buttons,
-            text="Teach Gesture",
+            text="Start Teaching",
             style="Primary.TButton",
             command=self.start_new_teaching,
         )
@@ -911,13 +1196,18 @@ class InteractiveGestureApp:
             value=0,
             style="Accent.Horizontal.TProgressbar",
         )
-        self.progress.grid(row=3, column=0, sticky="ew", pady=(14, 7))
+        self.progress.grid(row=4, column=0, sticky="ew", pady=(14, 7))
+        ttk.Label(
+            teach,
+            textvariable=self.teaching_state_var,
+            style="CardTitle.TLabel",
+        ).grid(row=5, column=0, sticky="w", pady=(0, 4))
         ttk.Label(
             teach,
             textvariable=self.status_var,
             style="CardText.TLabel",
             wraplength=430,
-        ).grid(row=4, column=0, sticky="w")
+        ).grid(row=6, column=0, sticky="w")
 
         smart = self._card(panel, 3)
         ttk.Label(smart, text="SMART CAPTURE", style="CardTitle.TLabel").grid(
@@ -939,9 +1229,9 @@ class InteractiveGestureApp:
         ttk.Label(
             hint,
             text=(
-                "Hold the same sign naturally. Small wrist/pose variation is useful; "
-                "large movement or switching the hand configuration is rejected. "
-                "One-hand and two-hand static gestures are both supported."
+                "Choose One hand or Two hands before Start Teaching. The session "
+                "waits until that exact hand count is stable, then Smart Capture "
+                "starts automatically. Small wrist/pose variation is useful."
             ),
             style="CardText.TLabel",
             wraplength=430,
@@ -1047,7 +1337,10 @@ class InteractiveGestureApp:
         )
         ttk.Label(
             panel,
-            text="Teach movements such as swipe, wave, or circle from live landmark trajectories.",
+            text=(
+                "Choose one or two hands, press Start Hands-Free Teaching once, "
+                "then perform each movement without touching the mouse."
+            ),
             style="PageText.TLabel",
             wraplength=450,
         ).grid(row=1, column=0, sticky="w", pady=(0, 12))
@@ -1062,42 +1355,50 @@ class InteractiveGestureApp:
             style="Modern.TEntry",
         )
         self.dynamic_name_entry.grid(row=1, column=0, sticky="ew", pady=(7, 8))
+
+        hand_mode = ttk.Frame(teach, style="Card.TFrame")
+        hand_mode.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        hand_mode.columnconfigure(1, weight=1)
+        hand_mode.columnconfigure(2, weight=1)
+        ttk.Label(hand_mode, text="HANDS", style="CardTitle.TLabel").grid(
+            row=0, column=0, sticky="w", padx=(0, 12)
+        )
+        self.dynamic_one_hand_radio = ttk.Radiobutton(
+            hand_mode,
+            text="One hand",
+            variable=self.dynamic_hand_mode_var,
+            value=ONE_HAND_MODE,
+            style="HandMode.TRadiobutton",
+        )
+        self.dynamic_one_hand_radio.grid(row=0, column=1, sticky="w")
+        self.dynamic_two_hand_radio = ttk.Radiobutton(
+            hand_mode,
+            text="Two hands",
+            variable=self.dynamic_hand_mode_var,
+            value=TWO_HAND_MODE,
+            style="HandMode.TRadiobutton",
+        )
+        self.dynamic_two_hand_radio.grid(row=0, column=2, sticky="w")
+
+        actions = ttk.Frame(teach, style="Card.TFrame")
+        actions.grid(row=3, column=0, sticky="ew")
+        actions.columnconfigure(0, weight=2)
+        actions.columnconfigure(1, weight=1)
         self.dynamic_teach_button = ttk.Button(
-            teach,
-            text="Teach Dynamic Gesture",
+            actions,
+            text="Start Hands-Free Teaching",
             style="Primary.TButton",
             command=self.start_dynamic_teaching,
         )
-        self.dynamic_teach_button.grid(row=2, column=0, sticky="ew")
-
-        demo_controls = ttk.Frame(teach, style="Card.TFrame")
-        demo_controls.grid(row=3, column=0, sticky="ew", pady=(8, 0))
-        for column in range(3):
-            demo_controls.columnconfigure(column, weight=1)
-        self.dynamic_start_demo_button = ttk.Button(
-            demo_controls,
-            text="●  Start Demo",
-            style="Primary.TButton",
-            command=self.start_dynamic_demo,
-            state="disabled",
-        )
-        self.dynamic_start_demo_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
-        self.dynamic_stop_demo_button = ttk.Button(
-            demo_controls,
-            text="■  Stop",
-            style="Secondary.TButton",
-            command=self.stop_dynamic_demo,
-            state="disabled",
-        )
-        self.dynamic_stop_demo_button.grid(row=0, column=1, sticky="ew", padx=4)
+        self.dynamic_teach_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
         self.dynamic_cancel_button = ttk.Button(
-            demo_controls,
+            actions,
             text="Cancel",
             style="Secondary.TButton",
             command=self.cancel_dynamic_teaching,
             state="disabled",
         )
-        self.dynamic_cancel_button.grid(row=0, column=2, sticky="ew", padx=(4, 0))
+        self.dynamic_cancel_button.grid(row=0, column=1, sticky="ew", padx=(4, 0))
 
         ttk.Label(
             teach,
@@ -1106,10 +1407,15 @@ class InteractiveGestureApp:
         ).grid(row=4, column=0, sticky="w", pady=(10, 2))
         ttk.Label(
             teach,
+            textvariable=self.dynamic_teaching_state_var,
+            style="CardTitle.TLabel",
+        ).grid(row=5, column=0, sticky="w", pady=(2, 4))
+        ttk.Label(
+            teach,
             textvariable=self.dynamic_status_var,
             style="CardMuted.TLabel",
             wraplength=430,
-        ).grid(row=5, column=0, sticky="w")
+        ).grid(row=6, column=0, sticky="w")
 
         table_card = self._card(panel, 3)
         ttk.Label(table_card, text="LEARNED DYNAMIC GESTURES", style="CardTitle.TLabel").grid(
@@ -1416,12 +1722,33 @@ class InteractiveGestureApp:
         self.selector = SmartSampleSelector()
         self.progress["maximum"] = self.selector.target_samples
 
+        if required_signature is not None:
+            hand_mode = hand_mode_from_signature(required_signature)
+            self.static_hand_mode_var.set(hand_mode)
+            required_count = required_hand_count(hand_mode)
+            exact_signature = required_signature
+        else:
+            hand_mode = self.static_hand_mode_var.get()
+            required_count = required_hand_count(hand_mode)
+            # Two-hand input always has the learner signature Both. For a new
+            # one-hand gesture, Left/Right is locked only after the readiness
+            # gate has observed a stable consistent hand.
+            exact_signature = "Both" if required_count == 2 else None
+
         self.teaching = True
         self.teaching_mode = mode
         self.teaching_name = name
         self.teaching_signature = None
-        self.required_teaching_signature = required_signature
-        self.prepare_until = time.monotonic() + 2.0
+        self.required_teaching_signature = exact_signature
+        self.teaching_required_hand_count = required_count
+        self.teaching_phase = "WAITING_HANDS"
+        self.teaching_readiness_gate = HandReadinessGate(
+            required_count,
+            expected_signature=exact_signature,
+            confirm_results=5,
+            hold_seconds=0.30,
+        )
+        self.prepare_until = None
 
         self.progress["value"] = 0
         self.reset_stats_display()
@@ -1429,6 +1756,8 @@ class InteractiveGestureApp:
         self.finish_button.config(state="disabled")
         self.cancel_button.config(state="normal")
         self.gesture_entry.config(state="disabled")
+        self.static_one_hand_radio.config(state="disabled")
+        self.static_two_hand_radio.config(state="disabled")
         self.set_feedback_buttons_enabled(False)
 
         action = {
@@ -1436,54 +1765,132 @@ class InteractiveGestureApp:
             "improve": "improve",
             "retrain": "retrain",
         }[mode]
-        expected = (
-            f" Use {required_signature} input."
-            if required_signature is not None
-            else " One or two hands are supported."
+        requirement = describe_hand_requirement(
+            required_count,
+            exact_signature if mode != "new" else None,
+        )
+        self.teaching_state_var.set(
+            f"● WAITING FOR {requirement.upper()}"
         )
         self.status_var.set(
-            f"Get ready to {action} '{name}'. Hold the gesture naturally.{expected}"
+            f"Ready to {action} '{name}'. Show {requirement}; capture will "
+            "start automatically only after the required hand configuration "
+            "is stable."
+        )
+
+    def _static_teaching_configuration_matches(self) -> bool:
+        if self.current_feature_set is None or self.teaching_signature is None:
+            return False
+        return (
+            self.current_feature_set.hand_count == self.teaching_required_hand_count
+            and self.current_feature_set.hand_signature == self.teaching_signature
         )
 
     def process_teaching_frame(self):
-        if self.current_feature_set is None:
-            self.status_var.set("Waiting for a hand...")
+        if not self.teaching or self.teaching_readiness_gate is None:
             return
 
         now = time.monotonic()
-        if self.prepare_until is not None and now < self.prepare_until:
-            remaining = self.prepare_until - now
-            self.status_var.set(
-                f"Teaching '{self.teaching_name}' starts in {remaining:.1f}s..."
+        feature_set = self.current_feature_set
+        hand_count = feature_set.hand_count if feature_set is not None else 0
+        hand_signature = (
+            feature_set.hand_signature if feature_set is not None else None
+        )
+        requirement = describe_hand_requirement(
+            self.teaching_required_hand_count,
+            self.required_teaching_signature,
+        )
+
+        if self.teaching_phase == "WAITING_HANDS":
+            readiness = self.teaching_readiness_gate.update(
+                hand_count=hand_count,
+                hand_signature=hand_signature,
+                result_token=self.current_tracking_timestamp_ms,
+                now=now,
             )
-            return
+            self.teaching_state_var.set(
+                f"● WAITING FOR {requirement.upper()}"
+            )
 
-        current_signature = self.current_feature_set.hand_signature
-
-        if self.required_teaching_signature is not None:
-            if current_signature != self.required_teaching_signature:
+            if not readiness.ready:
+                if hand_count == 0:
+                    detail = "No hand detected yet."
+                elif hand_count != self.teaching_required_hand_count:
+                    detail = (
+                        f"Currently detecting {hand_count}; "
+                        f"this gesture requires {self.teaching_required_hand_count}."
+                    )
+                else:
+                    detail = "Hold that configuration steady for a moment."
                 self.status_var.set(
-                    f"'{self.teaching_name}' expects {self.required_teaching_signature} "
-                    f"input. Current input is {current_signature}."
+                    f"Teaching is armed but not capturing. {detail}"
                 )
                 return
-            self.teaching_signature = self.required_teaching_signature
 
-        elif self.teaching_signature is None:
-            self.teaching_signature = current_signature
-            # Two-hand vectors include relative geometry and naturally vary more.
-            if current_signature == "Both":
+            self.teaching_signature = (
+                self.required_teaching_signature or readiness.hand_signature
+            )
+            if self.teaching_signature == "Both":
+                # Two-hand vectors include relative geometry and naturally vary
+                # more than one-hand vectors.
                 self.selector.stability_threshold = 0.050
                 self.selector.duplicate_threshold = 0.025
 
-        elif current_signature != self.teaching_signature:
+            self.teaching_phase = "COUNTDOWN"
+            self.prepare_until = now + self.teaching_countdown_seconds
+            self.teaching_state_var.set("● HANDS READY")
             self.status_var.set(
-                f"Continue using {self.teaching_signature} input for this gesture."
+                f"{requirement.capitalize()} detected and stable. Keep the "
+                "gesture visible; Smart Capture will start automatically."
             )
             return
 
+        if self.teaching_phase == "COUNTDOWN":
+            if not self._static_teaching_configuration_matches():
+                self.teaching_phase = "WAITING_HANDS"
+                self.prepare_until = None
+                self.teaching_signature = (
+                    self.required_teaching_signature
+                    if self.required_teaching_signature is not None
+                    else None
+                )
+                self.teaching_readiness_gate.reset()
+                self.teaching_state_var.set(
+                    f"● WAITING FOR {requirement.upper()}"
+                )
+                self.status_var.set(
+                    f"Hand configuration changed before capture. Show "
+                    f"{requirement} again."
+                )
+                return
+
+            remaining = max(0.0, (self.prepare_until or now) - now)
+            if remaining > 0.0:
+                self.teaching_state_var.set("● HOLD STEADY")
+                self.status_var.set(
+                    f"Hands ready. Capture starts automatically in {remaining:.1f}s..."
+                )
+                return
+
+            self.teaching_phase = "CAPTURING"
+            self.prepare_until = None
+            self.teaching_state_var.set("● CAPTURING")
+
+        if self.teaching_phase != "CAPTURING":
+            return
+
+        if not self._static_teaching_configuration_matches():
+            self.teaching_state_var.set("● CAPTURE PAUSED")
+            self.status_var.set(
+                f"Capture paused — keep {requirement} visible using the same "
+                "hand configuration."
+            )
+            return
+
+        self.teaching_state_var.set("● CAPTURING")
+
         # Smart Capture continues to judge stability/diversity in the raw hybrid
-        # geometry space.  The learned encoder may intentionally compress same-
+        # geometry space. The learned encoder may intentionally compress same-
         # class variation, which would otherwise make useful live samples look
         # like duplicates before they reach the learner.
         self.selector.consider(self.current_raw_features)
@@ -1494,12 +1901,14 @@ class InteractiveGestureApp:
             self.finish_button.config(state="normal")
             if not self.selector.complete:
                 self.status_var.set(
-                    "Enough useful samples to learn. You may finish now, or make "
-                    "small natural variations of the SAME gesture."
+                    "Enough useful samples to learn. Keep the selected hand "
+                    "configuration visible; the session will finish automatically "
+                    "at the target."
                 )
         else:
             self.status_var.set(
-                "Keep the gesture steady. Small natural variations are useful."
+                "Smart Capture is active. Hold the gesture steady; small natural "
+                "variations are useful."
             )
 
         if self.selector.complete:
@@ -1618,6 +2027,8 @@ class InteractiveGestureApp:
         self.teaching_name = None
         self.teaching_signature = None
         self.required_teaching_signature = None
+        self.teaching_phase = None
+        self.teaching_readiness_gate = None
         self.prepare_until = None
         self.selector = None
         self.prediction_stabilizer.reset()
@@ -1629,6 +2040,9 @@ class InteractiveGestureApp:
         self.finish_button.config(state="disabled")
         self.cancel_button.config(state="disabled")
         self.gesture_entry.config(state="normal")
+        self.static_one_hand_radio.config(state="normal")
+        self.static_two_hand_radio.config(state="normal")
+        self.teaching_state_var.set("● IDLE")
         self.gesture_name_var.set("")
         self.set_feedback_buttons_enabled(True)
         self.gesture_entry.focus_set()
@@ -1657,123 +2071,95 @@ class InteractiveGestureApp:
             )
             return
 
+        hand_mode = self.dynamic_hand_mode_var.get()
+        required_count = required_hand_count(hand_mode)
+        exact_signature = "Both" if required_count == 2 else None
+
         self.dynamic_teaching = True
         self.dynamic_demo_recording = False
         self.dynamic_teaching_name = name
-        self.dynamic_required_signature = None
+        self.dynamic_required_signature = exact_signature
+        self.dynamic_required_hand_count = required_count
+        self.dynamic_teaching_phase = "WAITING_HANDS"
         self.dynamic_demo_observations = []
         self.dynamic_templates = []
+        self.dynamic_previous_ready_observation = None
+        self.dynamic_next_arm_time = 0.0
+        self.last_dynamic_tracking_timestamp_ms = None
         self.motion_segmenter.reset()
+        self.dynamic_training_segmenter.reset()
+        self._reset_dynamic_readiness_gate()
         self.dynamic_demo_progress_var.set(
             f"Demonstrations: 0/{self.dynamic_target_demos}"
         )
 
         self.dynamic_name_entry.config(state="disabled")
+        self.dynamic_one_hand_radio.config(state="disabled")
+        self.dynamic_two_hand_radio.config(state="disabled")
         self.dynamic_teach_button.config(state="disabled")
-        self.dynamic_start_demo_button.config(state="normal")
-        self.dynamic_stop_demo_button.config(state="disabled")
         self.dynamic_cancel_button.config(state="normal")
+
+        requirement = describe_hand_requirement(required_count, exact_signature)
+        self.dynamic_teaching_state_var.set(
+            f"● WAITING FOR {requirement.upper()}"
+        )
         self.dynamic_status_var.set(
-            f"Ready to teach '{name}'. Press Start Demo, perform the entire "
-            "movement once, then press Stop Demo."
+            f"Teaching '{name}' is armed. Show {requirement} and hold the "
+            "starting pose still. You will not need the mouse again: movement "
+            "start and stop are detected automatically."
         )
 
-    def start_dynamic_demo(self):
-        if not self.dynamic_teaching or self.dynamic_demo_recording:
-            return
-        if not self.current_hands:
-            self.dynamic_status_var.set(
-                "Show the hand(s) you will use before starting the demo."
-            )
-            return
+    def _reset_dynamic_readiness_gate(self):
+        self.dynamic_readiness_gate = HandReadinessGate(
+            self.dynamic_required_hand_count,
+            expected_signature=self.dynamic_required_signature,
+            confirm_results=5,
+            hold_seconds=0.30,
+            max_motion_score=0.030,
+        )
+        self.dynamic_previous_ready_observation = None
 
-        now = time.monotonic()
-        observation = build_dynamic_observation(self.current_hands, now)
-        if observation is None:
-            self.dynamic_status_var.set("No stable hand configuration detected.")
-            return
-
-        if self.dynamic_required_signature is None:
-            self.dynamic_required_signature = observation.hand_signature
-        elif observation.hand_signature != self.dynamic_required_signature:
-            self.dynamic_status_var.set(
-                f"This gesture is locked to {self.dynamic_required_signature} input. "
-                f"Currently seeing {observation.hand_signature}."
-            )
-            return
-
-        self.dynamic_demo_recording = True
-        self.dynamic_demo_observations = [observation]
-        self.last_dynamic_sample_time = now
-        self.last_dynamic_tracking_timestamp_ms = self.current_tracking_timestamp_ms
-        demo_number = len(self.dynamic_templates) + 1
-        self.dynamic_start_demo_button.config(state="disabled")
-        self.dynamic_stop_demo_button.config(state="normal")
-        self.dynamic_status_var.set(
-            f"● Recording demo {demo_number}/{self.dynamic_target_demos}. "
-            "Perform the complete movement naturally, then press Stop Demo."
+    def _dynamic_requirement_text(self):
+        return describe_hand_requirement(
+            self.dynamic_required_hand_count,
+            self.dynamic_required_signature,
         )
 
-    def process_dynamic_training_frame(self, now):
-        if not self.dynamic_demo_recording:
-            return
-        if now - self.last_dynamic_sample_time < self.dynamic_sample_interval:
-            return
-        if (
-            self.current_tracking_timestamp_ms is None
-            or self.current_tracking_timestamp_ms == self.last_dynamic_tracking_timestamp_ms
-        ):
-            return
-        self.last_dynamic_sample_time = now
-        self.last_dynamic_tracking_timestamp_ms = self.current_tracking_timestamp_ms
-
-        observation = build_dynamic_observation(self.current_hands, now)
-        if observation is None:
-            self.dynamic_status_var.set(
-                "Recording: keep the hand(s) visible. Missing frames are ignored."
-            )
-            return
-        if observation.hand_signature != self.dynamic_required_signature:
-            self.dynamic_status_var.set(
-                f"Recording expects {self.dynamic_required_signature} input. "
-                "Keep the same hand configuration visible."
-            )
-            return
-
-        self.dynamic_demo_observations.append(observation)
-
-    def stop_dynamic_demo(self):
-        if not self.dynamic_teaching or not self.dynamic_demo_recording:
-            return
-
+    def _restart_dynamic_demo_arming(self, now, message, *, delay=0.50):
         self.dynamic_demo_recording = False
-        self.dynamic_stop_demo_button.config(state="disabled")
-        self.dynamic_start_demo_button.config(state="normal")
+        self.dynamic_teaching_phase = "BETWEEN_DEMOS"
+        self.dynamic_next_arm_time = float(now) + max(0.0, float(delay))
+        self.dynamic_training_segmenter.reset()
+        self._reset_dynamic_readiness_gate()
+        self.dynamic_teaching_state_var.set("● RETURN TO START")
+        self.dynamic_status_var.set(message)
 
+    def _accept_dynamic_demo(self, observations, now):
+        self.dynamic_demo_recording = False
         try:
-            trajectory = prepare_dynamic_trajectory(
-                self.dynamic_demo_observations
-            )
+            trajectory = prepare_dynamic_trajectory(observations)
         except Exception as error:
-            self.dynamic_demo_observations = []
-            self.dynamic_status_var.set(
-                f"Demo was not accepted: {error} Please record this demo again."
+            self._restart_dynamic_demo_arming(
+                now,
+                f"Demo was not accepted: {error} Return to the starting pose; "
+                "the same demo will re-arm automatically.",
             )
             return
 
         self.dynamic_templates.append(trajectory)
-        self.dynamic_demo_observations = []
         completed = len(self.dynamic_templates)
         self.dynamic_demo_progress_var.set(
             f"Demonstrations: {completed}/{self.dynamic_target_demos}"
         )
 
         if completed < self.dynamic_target_demos:
-            self.dynamic_status_var.set(
+            self._restart_dynamic_demo_arming(
+                now,
                 f"✓ Demo {completed} accepted "
-                f"({trajectory.duration_seconds:.2f}s, "
-                f"motion extent {trajectory.motion_extent:.2f}). "
-                "Return to the starting pose and record the next demonstration."
+                f"({trajectory.duration_seconds:.2f}s, motion extent "
+                f"{trajectory.motion_extent:.2f}). Return to the starting pose "
+                "and hold still; the next demo will arm automatically.",
+                delay=self.dynamic_inter_demo_delay,
             )
             return
 
@@ -1784,6 +2170,10 @@ class InteractiveGestureApp:
             )
             saved = self.save_dynamic_gesture_memory()
         except Exception as error:
+            self.dynamic_teaching_phase = "WAITING_HANDS"
+            self.dynamic_training_segmenter.reset()
+            self._reset_dynamic_readiness_gate()
+            self.dynamic_teaching_state_var.set("● LEARNING ERROR")
             self.dynamic_status_var.set(f"Dynamic learning failed: {error}")
             return
 
@@ -1800,6 +2190,136 @@ class InteractiveGestureApp:
         self.refresh_dynamic_gesture_table()
         self.dynamic_status_var.set(message)
 
+    def process_dynamic_training_frame(self, now):
+        if not self.dynamic_teaching:
+            return
+        if now - self.last_dynamic_sample_time < self.dynamic_sample_interval:
+            return
+        if (
+            self.current_tracking_timestamp_ms is None
+            or self.current_tracking_timestamp_ms
+            == self.last_dynamic_tracking_timestamp_ms
+        ):
+            return
+
+        self.last_dynamic_sample_time = now
+        self.last_dynamic_tracking_timestamp_ms = (
+            self.current_tracking_timestamp_ms
+        )
+        observation = build_dynamic_observation(self.current_hands, now)
+        hand_count = len(self.current_hands[:2]) if observation is not None else 0
+        hand_signature = observation.hand_signature if observation is not None else None
+        requirement = self._dynamic_requirement_text()
+
+        if self.dynamic_teaching_phase == "BETWEEN_DEMOS":
+            if now < self.dynamic_next_arm_time:
+                self.dynamic_teaching_state_var.set("● RETURN TO START")
+                return
+            self.dynamic_teaching_phase = "WAITING_HANDS"
+            self._reset_dynamic_readiness_gate()
+
+        if self.dynamic_teaching_phase == "WAITING_HANDS":
+            motion_score = 0.0
+            if observation is not None:
+                previous = self.dynamic_previous_ready_observation
+                if (
+                    previous is not None
+                    and previous.hand_signature == observation.hand_signature
+                ):
+                    motion_score = observation_motion_score(previous, observation)
+                self.dynamic_previous_ready_observation = observation
+            else:
+                self.dynamic_previous_ready_observation = None
+
+            readiness = self.dynamic_readiness_gate.update(
+                hand_count=hand_count,
+                hand_signature=hand_signature,
+                result_token=self.current_tracking_timestamp_ms,
+                now=now,
+                motion_score=motion_score if observation is not None else None,
+            )
+
+            requirement = describe_hand_requirement(
+                self.dynamic_required_hand_count,
+                self.dynamic_required_signature,
+            )
+            self.dynamic_teaching_state_var.set(
+                f"● WAITING FOR {requirement.upper()}"
+            )
+            if not readiness.ready:
+                if hand_count == 0:
+                    detail = "No hand detected."
+                elif hand_count != self.dynamic_required_hand_count:
+                    detail = (
+                        f"Currently detecting {hand_count}; "
+                        f"{self.dynamic_required_hand_count} required."
+                    )
+                elif motion_score > 0.030:
+                    detail = "Return to the starting pose and hold still."
+                else:
+                    detail = "Hold the starting pose still for a moment."
+                self.dynamic_status_var.set(
+                    f"Demo {len(self.dynamic_templates) + 1}/"
+                    f"{self.dynamic_target_demos} is waiting. {detail}"
+                )
+                return
+
+            if self.dynamic_required_signature is None:
+                self.dynamic_required_signature = readiness.hand_signature
+                # All later demonstrations use the exact same left/right hand.
+                self._reset_dynamic_readiness_gate()
+                requirement = self._dynamic_requirement_text()
+
+            self.dynamic_training_segmenter.reset()
+            if observation is not None:
+                self.dynamic_training_segmenter.update(observation, now)
+            self.dynamic_teaching_phase = "READY"
+            self.dynamic_teaching_state_var.set("● READY — START MOVING")
+            self.dynamic_status_var.set(
+                f"Demo {len(self.dynamic_templates) + 1}/"
+                f"{self.dynamic_target_demos} ready. Begin the gesture whenever "
+                "you are ready; recording will start automatically on movement."
+            )
+            return
+
+        # READY and RECORDING both require the exact locked configuration.
+        if (
+            observation is None
+            or observation.hand_signature != self.dynamic_required_signature
+            or hand_count != self.dynamic_required_hand_count
+        ):
+            if self.dynamic_teaching_phase == "RECORDING":
+                message = (
+                    f"Demo interrupted because {requirement} was lost. Return "
+                    "to the starting pose; this demo will retry automatically."
+                )
+            else:
+                message = (
+                    f"Lost the required {requirement} before movement started. "
+                    "Show the same configuration again."
+                )
+            self._restart_dynamic_demo_arming(now, message)
+            return
+
+        result = self.dynamic_training_segmenter.update(observation, now)
+
+        if result.state == self.dynamic_training_segmenter.MOTION:
+            self.dynamic_teaching_phase = "RECORDING"
+            self.dynamic_demo_recording = True
+            self.dynamic_teaching_state_var.set("● RECORDING MOVEMENT")
+            self.dynamic_status_var.set(
+                f"Recording demo {len(self.dynamic_templates) + 1}/"
+                f"{self.dynamic_target_demos}. Finish the movement naturally; "
+                "recording will stop automatically when motion settles."
+            )
+
+        if result.completed:
+            self._accept_dynamic_demo(result.completed, now)
+            return
+
+        if self.dynamic_teaching_phase == "READY":
+            self.dynamic_teaching_state_var.set("● READY — START MOVING")
+
     def cancel_dynamic_teaching(self):
         if not self.dynamic_teaching:
             return
@@ -1811,17 +2331,24 @@ class InteractiveGestureApp:
         self.dynamic_demo_recording = False
         self.dynamic_teaching_name = None
         self.dynamic_required_signature = None
+        self.dynamic_required_hand_count = 1
+        self.dynamic_teaching_phase = None
+        self.dynamic_readiness_gate = None
+        self.dynamic_previous_ready_observation = None
+        self.dynamic_next_arm_time = 0.0
         self.dynamic_demo_observations = []
         self.dynamic_templates = []
         self.last_dynamic_tracking_timestamp_ms = None
         self.motion_segmenter.reset()
+        self.dynamic_training_segmenter.reset()
 
         self.dynamic_name_entry.config(state="normal")
+        self.dynamic_one_hand_radio.config(state="normal")
+        self.dynamic_two_hand_radio.config(state="normal")
         self.dynamic_teach_button.config(state="normal")
-        self.dynamic_start_demo_button.config(state="disabled")
-        self.dynamic_stop_demo_button.config(state="disabled")
         self.dynamic_cancel_button.config(state="disabled")
         self.dynamic_name_var.set("")
+        self.dynamic_teaching_state_var.set("● IDLE")
         self.dynamic_demo_progress_var.set(
             f"Demonstrations: 0/{self.dynamic_target_demos}"
         )
@@ -1898,14 +2425,15 @@ class InteractiveGestureApp:
         self.dynamic_status_var.set("All dynamic gesture memory cleared.")
 
     def process_dynamic_runtime(self, now):
-        # Explicit training owns the temporal stream while a demo is recorded.
+        # Hands-free teaching owns the temporal stream. Runtime recognition is
+        # paused while the training state machine waits, arms, records, and
+        # automatically accepts demonstrations.
         if self.dynamic_teaching:
             self.motion_segmenter.reset()
             self.process_dynamic_training_frame(now)
+            phase = self.dynamic_teaching_phase or "TEACHING"
             self.dynamic_runtime_state_var.set(
-                "Dynamic: RECORDING DEMO"
-                if self.dynamic_demo_recording
-                else "Dynamic: TEACHING"
+                "Dynamic teaching: " + phase.replace("_", " ")
             )
             return
 
@@ -2472,10 +3000,7 @@ class InteractiveGestureApp:
 
             display_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             image = Image.fromarray(display_frame)
-            image.thumbnail((850, 650))
-            photo = ImageTk.PhotoImage(image=image)
-            self.video_label.configure(image=photo)
-            self.video_label.image = photo
+            self._render_camera_frame(image)
 
         self.root.after(15, self.update_camera)
 
@@ -2496,7 +3021,7 @@ class InteractiveGestureApp:
 
 def main():
     log_path = configure_logging(PROJECT_ROOT / "logs")
-    logger.info("Starting Adaptive Real-Time Hand Gesture Recognition V3.6")
+    logger.info("Starting Adaptive Real-Time Hand Gesture Recognition V3.6.3")
     logger.info("Log file: %s", log_path)
 
     root = tk.Tk()
