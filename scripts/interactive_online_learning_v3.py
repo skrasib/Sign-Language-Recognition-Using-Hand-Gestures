@@ -22,6 +22,10 @@ from adaptive_gesture.features.hand_features import build_frame_features
 from adaptive_gesture.learning.dynamic_learner import DynamicGestureLearner
 from adaptive_gesture.learning.motion_segmenter import MotionSegmenter
 from adaptive_gesture.learning.evt_open_set import EVTOpenSetGestureLearner
+from adaptive_gesture.learning.metric_runtime import (
+    load_or_train_metric_bank,
+    migrate_source_memory_to_metric,
+)
 from adaptive_gesture.learning.prediction_stabilizer import PredictionStabilizer
 from adaptive_gesture.learning.sample_selector import SmartSampleSelector
 from adaptive_gesture.storage.dynamic_gesture_store import DynamicGestureStore
@@ -36,12 +40,54 @@ logger = logging.getLogger(__name__)
 class InteractiveGestureApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Adaptive Real-Time Hand Gesture Recognition — V3.2 Geometry + EVT Open Set")
+        self.root.title("Adaptive Real-Time Hand Gesture Recognition — V3.3 Geometry + EVT + Metric Embedding")
         self.root.geometry("1450x900")
         self.root.minsize(1150, 760)
 
         # Core engine.
         self.tracker = HandTracker(max_num_hands=2)
+
+        # V3.3 learned metric stage.  The encoder is trained once from the
+        # existing V3.1/V3.2 raw hybrid landmark memory, persisted, and then
+        # frozen during normal runtime teaching.  New gesture classes therefore
+        # still become usable immediately without retraining the encoder.
+        self.metric_source_path = (
+            PROJECT_ROOT / "data" / "v3" / "gesture_memory_hybrid.json"
+        )
+        self.metric_encoder_path = (
+            PROJECT_ROOT / "data" / "v3" / "metric_encoder_v33.npz"
+        )
+        try:
+            self.metric_bootstrap = load_or_train_metric_bank(
+                source_memory_path=self.metric_source_path,
+                encoder_path=self.metric_encoder_path,
+                embedding_dim=48,
+                hidden_dim=96,
+                seed=42,
+            )
+            self.metric_bank = self.metric_bootstrap.bank
+            logger.info(
+                "Metric embedding ready: source_gestures=%s dimensions=%s trained_now=%s",
+                self.metric_bootstrap.source_gesture_count,
+                self.metric_bank.active_dimensions,
+                self.metric_bootstrap.trained_now,
+            )
+            for report in self.metric_bootstrap.reports:
+                logger.info(
+                    "Metric training d=%s classes=%s samples=%s epochs=%s "
+                    "loss=%.5f loo=%.3f separation=%.2fx",
+                    report.input_dimension,
+                    report.class_count,
+                    report.sample_count,
+                    report.epochs_ran,
+                    report.final_loss,
+                    report.leave_one_out_accuracy,
+                    report.separation_ratio,
+                )
+        except Exception:
+            logger.exception("Failed to initialise V3.3 metric embedding")
+            raise
+
         self.learner = EVTOpenSetGestureLearner(
             radius_multiplier=2.5,
             minimum_threshold=0.035,
@@ -74,17 +120,36 @@ class InteractiveGestureApp:
             unknown_label=self.learner.UNKNOWN_LABEL,
         )
 
-        # Persistent numerical gesture memory.
+        # V3.3 keeps metric-space runtime memory separate from the V3.1/V3.2
+        # raw hybrid source memory.  On first launch we migrate the old classes
+        # through the frozen encoder so the user can compare versions directly.
         self.gesture_store = GestureStore(
-            PROJECT_ROOT / "data" / "v3" / "gesture_memory_hybrid.json"
+            PROJECT_ROOT / "data" / "v3" / "gesture_memory_metric_v33.json"
         )
         self.restore_error = None
+        self.metric_migrated_gestures = 0
         try:
             self.restored_gestures = self.gesture_store.load_into(self.learner)
+            if (
+                self.restored_gestures == 0
+                and self.metric_bootstrap.source_gesture_count > 0
+            ):
+                self.metric_migrated_gestures = migrate_source_memory_to_metric(
+                    self.metric_bootstrap.source_learner,
+                    self.learner,
+                    self.metric_bank,
+                )
+                self.restored_gestures = self.metric_migrated_gestures
+                if self.metric_migrated_gestures:
+                    self.gesture_store.save(self.learner)
+                    logger.info(
+                        "Migrated %s hybrid gestures into V3.3 metric memory",
+                        self.metric_migrated_gestures,
+                    )
         except Exception as error:
             self.restored_gestures = 0
             self.restore_error = str(error)
-            logger.exception("Failed to restore static gesture memory")
+            logger.exception("Failed to restore V3.3 static gesture memory")
 
         # Dynamic gesture trajectories are stored separately from the existing
         # static memory. This avoids risky schema changes and stores landmarks
@@ -113,6 +178,7 @@ class InteractiveGestureApp:
 
         # Runtime input state.
         self.current_feature_set = None
+        self.current_raw_features = None
         self.current_features = None
         self.current_hand_signature = None
         self.current_prediction = None
@@ -193,14 +259,32 @@ class InteractiveGestureApp:
             )
         elif self.restored_gestures > 0:
             suffix = "s" if self.restored_gestures != 1 else ""
+            metric_text = (
+                f"metric encoder active for raw dimensions "
+                f"{self.metric_bank.active_dimensions}"
+                if self.metric_bank.is_active
+                else "metric encoder unavailable — using hybrid fallback"
+            )
+            migration_text = (
+                " Migrated from V3.2 source memory."
+                if self.metric_migrated_gestures
+                else ""
+            )
             self.status_var.set(
-                f"✓ Restored {self.restored_gestures} learned gesture{suffix} "
-                "from previous sessions."
+                f"✓ Restored {self.restored_gestures} learned gesture{suffix}; "
+                f"{metric_text}." + migration_text
             )
         else:
-            self.status_var.set(
-                "No saved gestures yet. Teach a new gesture to begin."
-            )
+            if self.metric_bank.is_active:
+                self.status_var.set(
+                    "Metric encoder ready. No V3.3 gesture memory yet; teach a "
+                    "new gesture to begin."
+                )
+            else:
+                self.status_var.set(
+                    "No metric encoder could be trained from V3.2 memory. "
+                    "V3.3 is using the hybrid descriptor fallback."
+                )
 
         if self.dynamic_restore_error:
             self.dynamic_status_var.set(
@@ -1079,7 +1163,8 @@ class InteractiveGestureApp:
             text=(
                 "MediaPipe hand landmarks\n"
                 "V3 hybrid geometry descriptor (XYZ + joint angles)\n"
-                "Adaptive multi-prototype few-shot learner\n"
+                "Frozen learned metric embedding (when source memory supports it)\n"
+                "EVT open-set rejection + adaptive multi-prototypes\n"
                 "Hard-negative feedback learning\n"
                 "Prediction stabilization\n"
                 "DTW-based dynamic gesture recognition"
@@ -1363,7 +1448,11 @@ class InteractiveGestureApp:
             )
             return
 
-        self.selector.consider(self.current_features)
+        # Smart Capture continues to judge stability/diversity in the raw hybrid
+        # geometry space.  The learned encoder may intentionally compress same-
+        # class variation, which would otherwise make useful live samples look
+        # like duplicates before they reach the learner.
+        self.selector.consider(self.current_raw_features)
         self.update_stats_display()
         self.progress["value"] = len(self.selector.samples)
 
@@ -1393,7 +1482,8 @@ class InteractiveGestureApp:
         accepted = self.selector.stats.accepted
         duplicates = self.selector.stats.duplicates
         unstable = self.selector.stats.unstable
-        samples = [sample.copy() for sample in self.selector.samples]
+        raw_samples = [sample.copy() for sample in self.selector.samples]
+        samples = [self.metric_bank.encode(sample) for sample in raw_samples]
         signature = self.teaching_signature
         name = self.teaching_name
         mode = self.teaching_mode
@@ -1423,6 +1513,46 @@ class InteractiveGestureApp:
                 action_text = "Retrained"
             else:
                 raise ValueError("Unknown teaching mode.")
+
+            # Keep a raw hybrid research archive alongside the frozen metric
+            # runtime memory.  This does NOT retrain the encoder automatically;
+            # it simply preserves future source material for controlled V3.3
+            # experiments or an explicit encoder retraining run.
+            source = self.metric_bootstrap.source_learner
+            try:
+                if mode == "new":
+                    if name not in source.gestures:
+                        source.learn_gesture(
+                            name=name,
+                            samples=raw_samples,
+                            hand_signature=signature,
+                        )
+                elif mode == "improve" and name in source.gestures:
+                    source.add_samples_to_gesture(
+                        name=name,
+                        samples=raw_samples,
+                        hand_signature=signature,
+                    )
+                elif mode == "retrain":
+                    if name in source.gestures:
+                        source.replace_gesture_samples(
+                            name=name,
+                            samples=raw_samples,
+                            hand_signature=signature,
+                            keep_negatives=True,
+                        )
+                    else:
+                        source.learn_gesture(
+                            name=name,
+                            samples=raw_samples,
+                            hand_signature=signature,
+                        )
+                GestureStore(self.metric_source_path).save(source)
+            except Exception:
+                # The runtime metric memory is authoritative for V3.3.  A failure
+                # to update the raw research archive must not discard a gesture
+                # that was successfully learned in the live app.
+                logger.exception("Could not update raw V3 metric source archive")
 
             saved = self.save_gesture_memory()
         except Exception as error:
@@ -2220,6 +2350,7 @@ class InteractiveGestureApp:
 
             self.current_feature_set = build_frame_features(hands, representation="hybrid")
             if self.current_feature_set is None:
+                self.current_raw_features = None
                 self.current_features = None
                 self.current_hand_signature = None
                 self._set_stringvar_if_changed(
@@ -2227,7 +2358,10 @@ class InteractiveGestureApp:
                     "No hand detected",
                 )
             else:
-                self.current_features = self.current_feature_set.vector
+                self.current_raw_features = self.current_feature_set.vector.copy()
+                self.current_features = self.metric_bank.encode(
+                    self.current_raw_features
+                )
                 self.current_hand_signature = self.current_feature_set.hand_signature
 
                 if self.current_hand_signature == "Both":
@@ -2244,6 +2378,14 @@ class InteractiveGestureApp:
                         f"Tracking {self.current_hand_signature} hand — "
                         f"{confidence:.0%}"
                     )
+
+                raw_dim = int(self.current_raw_features.shape[0])
+                if self.metric_bank.can_encode_dimension(raw_dim):
+                    tracking_text += (
+                        f" • metric {raw_dim}D→{self.current_features.shape[0]}D"
+                    )
+                else:
+                    tracking_text += f" • hybrid {raw_dim}D fallback"
 
                 self._set_stringvar_if_changed(
                     self.tracking_var,
@@ -2296,7 +2438,7 @@ class InteractiveGestureApp:
 
 def main():
     log_path = configure_logging(PROJECT_ROOT / "logs")
-    logger.info("Starting Adaptive Real-Time Hand Gesture Recognition")
+    logger.info("Starting Adaptive Real-Time Hand Gesture Recognition V3.3")
     logger.info("Log file: %s", log_path)
 
     root = tk.Tk()
