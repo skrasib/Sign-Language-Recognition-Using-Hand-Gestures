@@ -212,258 +212,646 @@ class InteractiveGestureApp:
     # UI
     # ========================================================
 
+    def setup_styles(self):
+        """Create a restrained dark UI using only built-in ttk/Tkinter."""
+        self.colors = {
+            "bg": "#0B1120",
+            "surface": "#111827",
+            "card": "#172033",
+            "card_alt": "#1C2940",
+            "border": "#2A3954",
+            "text": "#F8FAFC",
+            "muted": "#9CA9BC",
+            "accent": "#3B82F6",
+            "accent_hover": "#2563EB",
+            "success": "#22C55E",
+            "danger": "#EF4444",
+            "camera": "#020617",
+        }
+
+        self.root.configure(bg=self.colors["bg"])
+        style = ttk.Style(self.root)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+
+        style.configure("App.TFrame", background=self.colors["bg"])
+        style.configure("Surface.TFrame", background=self.colors["surface"])
+        style.configure("Card.TFrame", background=self.colors["card"])
+        style.configure("CardAlt.TFrame", background=self.colors["card_alt"])
+
+        style.configure(
+            "Title.TLabel",
+            background=self.colors["bg"],
+            foreground=self.colors["text"],
+            font=("Segoe UI", 20, "bold"),
+        )
+        style.configure(
+            "Subtitle.TLabel",
+            background=self.colors["bg"],
+            foreground=self.colors["muted"],
+            font=("Segoe UI", 10),
+        )
+        style.configure(
+            "Section.TLabel",
+            background=self.colors["bg"],
+            foreground=self.colors["text"],
+            font=("Segoe UI", 15, "bold"),
+        )
+        style.configure(
+            "CardTitle.TLabel",
+            background=self.colors["card"],
+            foreground=self.colors["muted"],
+            font=("Segoe UI", 9, "bold"),
+        )
+        style.configure(
+            "CardText.TLabel",
+            background=self.colors["card"],
+            foreground=self.colors["text"],
+            font=("Segoe UI", 10),
+        )
+        style.configure(
+            "CardMuted.TLabel",
+            background=self.colors["card"],
+            foreground=self.colors["muted"],
+            font=("Segoe UI", 9),
+        )
+        style.configure(
+            "Prediction.TLabel",
+            background=self.colors["card"],
+            foreground=self.colors["text"],
+            font=("Segoe UI", 28, "bold"),
+        )
+        style.configure(
+            "DynamicPrediction.TLabel",
+            background=self.colors["card"],
+            foreground=self.colors["text"],
+            font=("Segoe UI", 20, "bold"),
+        )
+        style.configure(
+            "CameraHeader.TLabel",
+            background=self.colors["surface"],
+            foreground=self.colors["muted"],
+            font=("Segoe UI", 9, "bold"),
+        )
+        style.configure(
+            "CameraStatus.TLabel",
+            background=self.colors["surface"],
+            foreground=self.colors["text"],
+            font=("Segoe UI", 10),
+        )
+        style.configure(
+            "PageText.TLabel",
+            background=self.colors["bg"],
+            foreground=self.colors["muted"],
+            font=("Segoe UI", 10),
+        )
+
+        style.configure(
+            "Primary.TButton",
+            background=self.colors["accent"],
+            foreground="#FFFFFF",
+            borderwidth=0,
+            focusthickness=0,
+            padding=(14, 9),
+            font=("Segoe UI", 10, "bold"),
+        )
+        style.map(
+            "Primary.TButton",
+            background=[("active", self.colors["accent_hover"]), ("disabled", "#334155")],
+            foreground=[("disabled", "#94A3B8")],
+        )
+        style.configure(
+            "Secondary.TButton",
+            background=self.colors["card_alt"],
+            foreground=self.colors["text"],
+            borderwidth=0,
+            padding=(12, 8),
+            font=("Segoe UI", 9, "bold"),
+        )
+        style.map(
+            "Secondary.TButton",
+            background=[("active", "#263650"), ("disabled", "#1F2937")],
+            foreground=[("disabled", "#64748B")],
+        )
+        style.configure(
+            "Danger.TButton",
+            background="#3B1C25",
+            foreground="#FCA5A5",
+            borderwidth=0,
+            padding=(12, 8),
+            font=("Segoe UI", 9, "bold"),
+        )
+        style.map("Danger.TButton", background=[("active", "#55232E")])
+
+        style.configure(
+            "Nav.TButton",
+            background=self.colors["surface"],
+            foreground=self.colors["muted"],
+            borderwidth=0,
+            padding=(12, 9),
+            font=("Segoe UI", 9, "bold"),
+        )
+        style.map("Nav.TButton", background=[("active", self.colors["card_alt"])])
+        style.configure(
+            "NavActive.TButton",
+            background=self.colors["accent"],
+            foreground="#FFFFFF",
+            borderwidth=0,
+            padding=(12, 9),
+            font=("Segoe UI", 9, "bold"),
+        )
+
+        style.configure(
+            "Modern.TEntry",
+            fieldbackground=self.colors["card_alt"],
+            foreground=self.colors["text"],
+            insertcolor=self.colors["text"],
+            bordercolor=self.colors["border"],
+            lightcolor=self.colors["border"],
+            darkcolor=self.colors["border"],
+            padding=8,
+        )
+        style.configure(
+            "Modern.TCombobox",
+            fieldbackground=self.colors["card_alt"],
+            background=self.colors["card_alt"],
+            foreground=self.colors["text"],
+            arrowcolor=self.colors["text"],
+            bordercolor=self.colors["border"],
+            padding=6,
+        )
+        style.map(
+            "Modern.TCombobox",
+            fieldbackground=[("readonly", self.colors["card_alt"])],
+            foreground=[("readonly", self.colors["text"])],
+        )
+
+        style.configure(
+            "Accent.Horizontal.TProgressbar",
+            troughcolor=self.colors["card_alt"],
+            background=self.colors["accent"],
+            bordercolor=self.colors["card_alt"],
+            lightcolor=self.colors["accent"],
+            darkcolor=self.colors["accent"],
+            thickness=10,
+        )
+
+        style.configure(
+            "Treeview",
+            background=self.colors["card"],
+            fieldbackground=self.colors["card"],
+            foreground=self.colors["text"],
+            rowheight=31,
+            borderwidth=0,
+            font=("Segoe UI", 9),
+        )
+        style.map(
+            "Treeview",
+            background=[("selected", self.colors["accent"])],
+            foreground=[("selected", "#FFFFFF")],
+        )
+        style.configure(
+            "Treeview.Heading",
+            background=self.colors["card_alt"],
+            foreground=self.colors["muted"],
+            borderwidth=0,
+            relief="flat",
+            font=("Segoe UI", 9, "bold"),
+            padding=(6, 7),
+        )
+        style.map("Treeview.Heading", background=[("active", "#263650")])
+
     def build_ui(self):
-        self.root.columnconfigure(0, weight=3)
-        self.root.columnconfigure(1, weight=2)
-        self.root.rowconfigure(0, weight=1)
+        self.setup_styles()
+        self.root.geometry("1500x900")
+        self.root.minsize(1180, 760)
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(1, weight=1)
 
-        # Camera area.
-        camera_frame = ttk.Frame(self.root, padding=12)
-        camera_frame.grid(row=0, column=0, sticky="nsew")
-        camera_frame.rowconfigure(0, weight=1)
-        camera_frame.columnconfigure(0, weight=1)
+        # ----------------------------------------------------
+        # App header
+        # ----------------------------------------------------
+        header = ttk.Frame(self.root, style="App.TFrame", padding=(22, 14, 22, 10))
+        header.grid(row=0, column=0, sticky="ew")
+        header.columnconfigure(0, weight=1)
 
-        self.video_label = ttk.Label(camera_frame, anchor="center")
+        title_block = ttk.Frame(header, style="App.TFrame")
+        title_block.grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            title_block,
+            text="Adaptive Sign & Gesture Recognition",
+            style="Title.TLabel",
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            title_block,
+            text="Personalized online few-shot learning • Static + dynamic gestures",
+            style="Subtitle.TLabel",
+        ).grid(row=1, column=0, sticky="w", pady=(2, 0))
+
+        privacy = ttk.Label(
+            header,
+            text="●  Landmark-only memory • No video stored",
+            style="Subtitle.TLabel",
+        )
+        privacy.grid(row=0, column=1, rowspan=2, sticky="e")
+
+        # ----------------------------------------------------
+        # Main body: persistent camera + navigable workspace
+        # ----------------------------------------------------
+        body = ttk.Frame(self.root, style="App.TFrame", padding=(20, 6, 20, 18))
+        body.grid(row=1, column=0, sticky="nsew")
+        body.columnconfigure(0, weight=7, uniform="main")
+        body.columnconfigure(1, weight=5, uniform="main")
+        body.rowconfigure(0, weight=1)
+
+        # Camera surface.
+        camera_shell = ttk.Frame(body, style="Surface.TFrame", padding=12)
+        camera_shell.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        camera_shell.columnconfigure(0, weight=1)
+        camera_shell.rowconfigure(1, weight=1)
+
+        camera_header = ttk.Frame(camera_shell, style="Surface.TFrame")
+        camera_header.grid(row=0, column=0, sticky="ew", pady=(0, 9))
+        camera_header.columnconfigure(0, weight=1)
+        ttk.Label(
+            camera_header,
+            text="LIVE CAMERA",
+            style="CameraHeader.TLabel",
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            camera_header,
+            text="MediaPipe • 1–2 hands",
+            style="CameraHeader.TLabel",
+        ).grid(row=0, column=1, sticky="e")
+
+        camera_canvas = tk.Frame(
+            camera_shell,
+            bg=self.colors["camera"],
+            highlightthickness=1,
+            highlightbackground=self.colors["border"],
+        )
+        camera_canvas.grid(row=1, column=0, sticky="nsew")
+        camera_canvas.rowconfigure(0, weight=1)
+        camera_canvas.columnconfigure(0, weight=1)
+
+        self.video_label = tk.Label(
+            camera_canvas,
+            bg=self.colors["camera"],
+            bd=0,
+            anchor="center",
+        )
         self.video_label.grid(row=0, column=0, sticky="nsew")
 
+        camera_footer = ttk.Frame(camera_shell, style="Surface.TFrame")
+        camera_footer.grid(row=2, column=0, sticky="ew", pady=(9, 0))
+        camera_footer.columnconfigure(0, weight=1)
         self.tracking_label = ttk.Label(
-            camera_frame,
+            camera_footer,
             textvariable=self.tracking_var,
-            font=("Segoe UI", 11),
+            style="CameraStatus.TLabel",
         )
-        self.tracking_label.grid(row=1, column=0, pady=(10, 0))
+        self.tracking_label.grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            camera_footer,
+            text="Camera frames stay in memory only",
+            style="CameraHeader.TLabel",
+        ).grid(row=0, column=1, sticky="e")
 
-        # Right-side tabs keep the application usable on smaller screens.
-        notebook = ttk.Notebook(self.root)
-        notebook.grid(row=0, column=1, sticky="nsew", padx=(0, 10), pady=10)
+        # Right workspace.
+        workspace = ttk.Frame(body, style="Surface.TFrame", padding=12)
+        workspace.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+        workspace.columnconfigure(0, weight=1)
+        workspace.rowconfigure(1, weight=1)
 
-        self.live_tab = ttk.Frame(notebook, padding=16)
-        self.library_tab = ttk.Frame(notebook, padding=16)
-        self.dynamic_tab = ttk.Frame(notebook, padding=16)
-        notebook.add(self.live_tab, text="Live")
-        notebook.add(self.library_tab, text="Gesture Library")
-        notebook.add(self.dynamic_tab, text="Dynamic Gestures")
+        nav = ttk.Frame(workspace, style="Surface.TFrame")
+        nav.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        for column in range(5):
+            nav.columnconfigure(column, weight=1)
 
-        self.live_tab.columnconfigure(0, weight=1)
-        self.library_tab.columnconfigure(0, weight=1)
-        self.library_tab.rowconfigure(1, weight=1)
-        self.dynamic_tab.columnconfigure(0, weight=1)
-        self.dynamic_tab.rowconfigure(8, weight=1)
+        self.nav_buttons = {}
+        nav_items = [
+            ("Live", "Live"),
+            ("Teach", "Teach"),
+            ("Library", "Library"),
+            ("Dynamic", "Dynamic"),
+            ("Settings", "About"),
+        ]
+        for column, (key, label) in enumerate(nav_items):
+            button = ttk.Button(
+                nav,
+                text=label,
+                style="Nav.TButton",
+                command=lambda page=key: self.show_page(page),
+            )
+            button.grid(row=0, column=column, sticky="ew", padx=(0 if column == 0 else 3, 0))
+            self.nav_buttons[key] = button
 
-        self.build_live_tab(self.live_tab)
-        self.build_library_tab(self.library_tab)
-        self.build_dynamic_tab(self.dynamic_tab)
+        self.page_container = ttk.Frame(workspace, style="App.TFrame")
+        self.page_container.grid(row=1, column=0, sticky="nsew")
+        self.page_container.columnconfigure(0, weight=1)
+        self.page_container.rowconfigure(0, weight=1)
+
+        self.pages = {}
+        for name in ("Live", "Teach", "Library", "Dynamic", "Settings"):
+            page = ttk.Frame(self.page_container, style="App.TFrame")
+            page.grid(row=0, column=0, sticky="nsew")
+            page.columnconfigure(0, weight=1)
+            self.pages[name] = page
+
+        self.build_live_tab(self.pages["Live"])
+        self.build_teach_tab(self.pages["Teach"])
+        self.build_library_tab(self.pages["Library"])
+        self.build_dynamic_tab(self.pages["Dynamic"])
+        self.build_settings_tab(self.pages["Settings"])
+        self.show_page("Live")
+
+    def show_page(self, name):
+        page = self.pages.get(name)
+        if page is None:
+            return
+        page.tkraise()
+        for key, button in self.nav_buttons.items():
+            button.configure(style="NavActive.TButton" if key == name else "Nav.TButton")
+
+    def _card(self, parent, row, pady=(0, 10)):
+        card = ttk.Frame(parent, style="Card.TFrame", padding=16)
+        card.grid(row=row, column=0, sticky="ew", pady=pady)
+        card.columnconfigure(0, weight=1)
+        return card
 
     def build_live_tab(self, panel):
+        panel.rowconfigure(4, weight=1)
+
+        ttk.Label(panel, text="Live Recognition", style="Section.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(2, 2)
+        )
         ttk.Label(
             panel,
-            text="Current Prediction",
-            font=("Segoe UI", 11, "bold"),
-        ).grid(row=0, column=0, sticky="w")
+            text="Confirmed predictions are temporally stabilized before they are shown.",
+            style="PageText.TLabel",
+        ).grid(row=1, column=0, sticky="w", pady=(0, 12))
+
+        recognition = self._card(panel, 2)
+        top = ttk.Frame(recognition, style="Card.TFrame")
+        top.grid(row=0, column=0, sticky="ew")
+        top.columnconfigure(0, weight=1)
+        ttk.Label(top, text="STATIC RECOGNITION", style="CardTitle.TLabel").grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Label(
+            top,
+            text="STABILIZED",
+            style="CardTitle.TLabel",
+        ).grid(row=0, column=1, sticky="e")
 
         ttk.Label(
-            panel,
+            recognition,
             textvariable=self.prediction_var,
-            font=("Segoe UI", 27, "bold"),
-        ).grid(row=1, column=0, sticky="w", pady=(3, 4))
+            style="Prediction.TLabel",
+        ).grid(row=1, column=0, sticky="w", pady=(8, 2))
+        ttk.Label(
+            recognition,
+            textvariable=self.rejection_reason_var,
+            style="CardMuted.TLabel",
+            wraplength=430,
+        ).grid(row=2, column=0, sticky="w", pady=(0, 10))
 
-        ttk.Label(panel, textvariable=self.distance_var).grid(
-            row=2, column=0, sticky="w"
+        # Main users only need the confidence index. Raw metrics remain visible
+        # as compact research details underneath for development/evaluation.
+        ttk.Label(
+            recognition,
+            textvariable=self.relative_distance_var,
+            style="CardText.TLabel",
+        ).grid(row=3, column=0, sticky="w")
+
+        details = ttk.Frame(recognition, style="Card.TFrame")
+        details.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        details.columnconfigure(0, weight=1)
+        ttk.Label(details, textvariable=self.distance_var, style="CardMuted.TLabel").grid(
+            row=0, column=0, sticky="w"
         )
-        ttk.Label(panel, textvariable=self.threshold_var).grid(
-            row=3, column=0, sticky="w"
-        )
-        ttk.Label(panel, textvariable=self.relative_distance_var).grid(
-            row=4, column=0, sticky="w"
-        )
-        ttk.Label(panel, textvariable=self.rejection_reason_var).grid(
-            row=5, column=0, sticky="w", pady=(2, 0)
+        ttk.Label(details, textvariable=self.threshold_var, style="CardMuted.TLabel").grid(
+            row=1, column=0, sticky="w"
         )
 
-        ttk.Separator(panel).grid(row=6, column=0, sticky="ew", pady=14)
+        feedback = self._card(panel, 3)
+        ttk.Label(feedback, text="TEACH THROUGH FEEDBACK", style="CardTitle.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(0, 9)
+        )
+        feedback_buttons = ttk.Frame(feedback, style="Card.TFrame")
+        feedback_buttons.grid(row=1, column=0, sticky="ew")
+        feedback_buttons.columnconfigure(0, weight=1)
+        feedback_buttons.columnconfigure(1, weight=1)
 
-        # New gesture teaching.
+        self.correct_button = ttk.Button(
+            feedback_buttons,
+            text="✓  Correct",
+            style="Primary.TButton",
+            command=self.confirm_prediction,
+        )
+        self.correct_button.grid(row=0, column=0, sticky="ew", padx=(0, 5))
+        self.wrong_button = ttk.Button(
+            feedback_buttons,
+            text="✕  Wrong",
+            style="Secondary.TButton",
+            command=self.begin_correction,
+        )
+        self.wrong_button.grid(row=0, column=1, sticky="ew", padx=(5, 0))
+
+        self.correction_frame = ttk.Frame(feedback, style="CardAlt.TFrame", padding=12)
+        self.correction_frame.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        self.correction_frame.columnconfigure(0, weight=1)
+        ttk.Label(
+            self.correction_frame,
+            text="What was the actual gesture?",
+            background=self.colors["card_alt"],
+            foreground=self.colors["text"],
+            font=("Segoe UI", 10, "bold"),
+        ).grid(row=0, column=0, sticky="w")
+        self.actual_gesture_combo = ttk.Combobox(
+            self.correction_frame,
+            textvariable=self.actual_gesture_var,
+            state="readonly",
+            style="Modern.TCombobox",
+        )
+        self.actual_gesture_combo.grid(row=1, column=0, sticky="ew", pady=(7, 8))
+        ttk.Button(
+            self.correction_frame,
+            text="Apply Correction",
+            style="Primary.TButton",
+            command=self.apply_feedback_correction,
+        ).grid(row=2, column=0, sticky="ew")
+        ttk.Button(
+            self.correction_frame,
+            text="Mark as Unknown",
+            style="Secondary.TButton",
+            command=self.mark_feedback_unknown,
+        ).grid(row=3, column=0, sticky="ew", pady=(6, 0))
+        ttk.Button(
+            self.correction_frame,
+            text="Cancel",
+            style="Secondary.TButton",
+            command=self.cancel_feedback,
+        ).grid(row=4, column=0, sticky="ew", pady=(6, 0))
+        self.correction_frame.grid_remove()
+
+        dynamic = self._card(panel, 4, pady=(0, 10))
+        ttk.Label(dynamic, text="DYNAMIC RECOGNITION", style="CardTitle.TLabel").grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Label(
+            dynamic,
+            textvariable=self.dynamic_prediction_var,
+            style="DynamicPrediction.TLabel",
+        ).grid(row=1, column=0, sticky="w", pady=(7, 2))
+        ttk.Label(
+            dynamic,
+            textvariable=self.dynamic_distance_var,
+            style="CardText.TLabel",
+        ).grid(row=2, column=0, sticky="w")
+        ttk.Label(
+            dynamic,
+            textvariable=self.dynamic_runtime_state_var,
+            style="CardMuted.TLabel",
+        ).grid(row=3, column=0, sticky="w", pady=(7, 0))
+
+        status = self._card(panel, 5, pady=(0, 0))
+        ttk.Label(status, text="SESSION STATUS", style="CardTitle.TLabel").grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Label(
+            status,
+            textvariable=self.status_var,
+            style="CardText.TLabel",
+            wraplength=430,
+        ).grid(row=1, column=0, sticky="w", pady=(6, 0))
+
+    def build_teach_tab(self, panel):
+        ttk.Label(panel, text="Teach a Static Gesture", style="Section.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(2, 2)
+        )
         ttk.Label(
             panel,
-            text="Teach a New Gesture",
-            font=("Segoe UI", 12, "bold"),
-        ).grid(row=7, column=0, sticky="w")
+            text="Name the gesture, demonstrate it naturally, and Smart Capture keeps only useful examples.",
+            style="PageText.TLabel",
+            wraplength=450,
+        ).grid(row=1, column=0, sticky="w", pady=(0, 12))
 
-        ttk.Label(panel, text="Gesture name").grid(
-            row=8, column=0, sticky="w", pady=(8, 3)
+        teach = self._card(panel, 2)
+        ttk.Label(teach, text="GESTURE NAME", style="CardTitle.TLabel").grid(
+            row=0, column=0, sticky="w"
         )
-
-        self.gesture_entry = ttk.Entry(panel, textvariable=self.gesture_name_var)
-        self.gesture_entry.grid(row=9, column=0, sticky="ew")
+        self.gesture_entry = ttk.Entry(
+            teach,
+            textvariable=self.gesture_name_var,
+            style="Modern.TEntry",
+        )
+        self.gesture_entry.grid(row=1, column=0, sticky="ew", pady=(7, 10))
         self.gesture_entry.bind("<Return>", lambda event: self.start_new_teaching())
 
-        teaching_buttons = ttk.Frame(panel)
-        teaching_buttons.grid(row=10, column=0, sticky="ew", pady=(10, 0))
+        teaching_buttons = ttk.Frame(teach, style="Card.TFrame")
+        teaching_buttons.grid(row=2, column=0, sticky="ew")
         for column in range(3):
             teaching_buttons.columnconfigure(column, weight=1)
-
         self.teach_button = ttk.Button(
             teaching_buttons,
             text="Teach Gesture",
+            style="Primary.TButton",
             command=self.start_new_teaching,
         )
         self.teach_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
-
         self.finish_button = ttk.Button(
             teaching_buttons,
-            text="Finish Learning",
+            text="Finish",
+            style="Secondary.TButton",
             command=self.finish_teaching,
             state="disabled",
         )
         self.finish_button.grid(row=0, column=1, sticky="ew", padx=4)
-
         self.cancel_button = ttk.Button(
             teaching_buttons,
             text="Cancel",
+            style="Secondary.TButton",
             command=self.cancel_teaching,
             state="disabled",
         )
         self.cancel_button.grid(row=0, column=2, sticky="ew", padx=(4, 0))
 
-        self.progress = ttk.Progressbar(panel, maximum=12, value=0)
-        self.progress.grid(row=11, column=0, sticky="ew", pady=(12, 6))
-
+        self.progress = ttk.Progressbar(
+            teach,
+            maximum=12,
+            value=0,
+            style="Accent.Horizontal.TProgressbar",
+        )
+        self.progress.grid(row=3, column=0, sticky="ew", pady=(14, 7))
         ttk.Label(
-            panel,
+            teach,
             textvariable=self.status_var,
-            wraplength=440,
-        ).grid(row=12, column=0, sticky="w", pady=(0, 10))
+            style="CardText.TLabel",
+            wraplength=430,
+        ).grid(row=4, column=0, sticky="w")
 
-        # Smart capture.
-        stats_frame = ttk.LabelFrame(panel, text="Smart Capture", padding=10)
-        stats_frame.grid(row=13, column=0, sticky="ew")
-        stats_frame.columnconfigure(0, weight=1)
-        stats_frame.columnconfigure(1, weight=1)
-
-        self.add_stat_row(stats_frame, 0, "Frames observed", self.observed_var)
-        self.add_stat_row(stats_frame, 1, "Useful samples", self.accepted_var)
-        self.add_stat_row(stats_frame, 2, "Duplicates ignored", self.duplicate_var)
-        self.add_stat_row(stats_frame, 3, "Unstable ignored", self.unstable_var)
-        self.add_stat_row(stats_frame, 4, "Current stability", self.stability_var)
-        self.add_stat_row(stats_frame, 5, "Input mode", self.input_mode_var)
-
-        ttk.Separator(panel).grid(row=14, column=0, sticky="ew", pady=14)
-
-        # Interactive feedback.
-        feedback_frame = ttk.LabelFrame(
-            panel,
-            text="Interactive Feedback",
-            padding=10,
+        smart = self._card(panel, 3)
+        ttk.Label(smart, text="SMART CAPTURE", style="CardTitle.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(0, 8)
         )
-        feedback_frame.grid(row=15, column=0, sticky="ew")
-        feedback_frame.columnconfigure(0, weight=1)
-        feedback_frame.columnconfigure(1, weight=1)
+        smart.columnconfigure(0, weight=1)
+        smart.columnconfigure(1, weight=1)
+        self.add_stat_row(smart, 1, "Frames observed", self.observed_var)
+        self.add_stat_row(smart, 2, "Useful samples", self.accepted_var)
+        self.add_stat_row(smart, 3, "Duplicates ignored", self.duplicate_var)
+        self.add_stat_row(smart, 4, "Unstable ignored", self.unstable_var)
+        self.add_stat_row(smart, 5, "Current stability", self.stability_var)
+        self.add_stat_row(smart, 6, "Input mode", self.input_mode_var)
 
-        self.correct_button = ttk.Button(
-            feedback_frame,
-            text="✓ Correct",
-            command=self.confirm_prediction,
+        hint = self._card(panel, 4, pady=(0, 0))
+        ttk.Label(hint, text="HOW TO DEMONSTRATE", style="CardTitle.TLabel").grid(
+            row=0, column=0, sticky="w"
         )
-        self.correct_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
-
-        self.wrong_button = ttk.Button(
-            feedback_frame,
-            text="✕ Wrong",
-            command=self.begin_correction,
-        )
-        self.wrong_button.grid(row=0, column=1, sticky="ew", padx=(4, 0))
-
-        self.correction_frame = ttk.Frame(feedback_frame)
-        self.correction_frame.grid(
-            row=1,
-            column=0,
-            columnspan=2,
-            sticky="ew",
-            pady=(10, 0),
-        )
-        self.correction_frame.columnconfigure(0, weight=1)
-
         ttk.Label(
-            self.correction_frame,
-            text="What was the actual gesture?",
-        ).grid(row=0, column=0, sticky="w")
-
-        self.actual_gesture_combo = ttk.Combobox(
-            self.correction_frame,
-            textvariable=self.actual_gesture_var,
-            state="readonly",
-        )
-        self.actual_gesture_combo.grid(row=1, column=0, sticky="ew", pady=(4, 7))
-
-        ttk.Button(
-            self.correction_frame,
-            text="Apply Correction",
-            command=self.apply_feedback_correction,
-        ).grid(row=2, column=0, sticky="ew")
-
-        ttk.Button(
-            self.correction_frame,
-            text="This Gesture Is Unknown",
-            command=self.mark_feedback_unknown,
-        ).grid(row=3, column=0, sticky="ew", pady=(5, 0))
-
-        ttk.Button(
-            self.correction_frame,
-            text="Cancel Feedback",
-            command=self.cancel_feedback,
-        ).grid(row=4, column=0, sticky="ew", pady=(5, 0))
-
-        self.correction_frame.grid_remove()
-
-        # Dynamic recognition is segment-based and shown separately so static
-        # frame classification remains unchanged.
-        dynamic_live = ttk.LabelFrame(
-            panel,
-            text="Dynamic Recognition",
-            padding=10,
-        )
-        dynamic_live.grid(row=16, column=0, sticky="ew", pady=(14, 0))
-        dynamic_live.columnconfigure(0, weight=1)
-
-        ttk.Label(
-            dynamic_live,
-            textvariable=self.dynamic_prediction_var,
-            font=("Segoe UI", 18, "bold"),
-        ).grid(row=0, column=0, sticky="w")
-        ttk.Label(
-            dynamic_live,
-            textvariable=self.dynamic_distance_var,
-        ).grid(row=1, column=0, sticky="w")
-        ttk.Label(
-            dynamic_live,
-            textvariable=self.dynamic_runtime_state_var,
-        ).grid(row=2, column=0, sticky="w")
+            hint,
+            text=(
+                "Hold the same sign naturally. Small wrist/pose variation is useful; "
+                "large movement or switching the hand configuration is rejected. "
+                "One-hand and two-hand static gestures are both supported."
+            ),
+            style="CardText.TLabel",
+            wraplength=430,
+        ).grid(row=1, column=0, sticky="w", pady=(6, 0))
 
     def build_library_tab(self, panel):
+        panel.rowconfigure(3, weight=1)
+        ttk.Label(panel, text="Gesture Library", style="Section.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(2, 2)
+        )
         ttk.Label(
             panel,
-            text="Learned Gestures",
-            font=("Segoe UI", 12, "bold"),
-        ).grid(row=0, column=0, sticky="w", pady=(0, 8))
+            text="Manage the personalized static gestures stored on this device.",
+            style="PageText.TLabel",
+        ).grid(row=1, column=0, sticky="w", pady=(0, 12))
 
+        table_card = self._card(panel, 2)
+        table_card.rowconfigure(1, weight=1)
+        ttk.Label(table_card, text="LEARNED STATIC GESTURES", style="CardTitle.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(0, 8)
+        )
+
+        table_wrap = ttk.Frame(table_card, style="Card.TFrame")
+        table_wrap.grid(row=1, column=0, sticky="nsew")
+        table_wrap.columnconfigure(0, weight=1)
+        table_wrap.rowconfigure(0, weight=1)
         self.gesture_table = ttk.Treeview(
-            panel,
-            columns=(
-                "gesture",
-                "positive",
-                "negative",
-                "prototypes",
-                "spread",
-                "radius",
-                "input",
-            ),
+            table_wrap,
+            columns=("gesture", "positive", "negative", "prototypes", "spread", "radius", "input"),
             show="headings",
-            height=15,
+            height=11,
         )
         headings = {
             "gesture": "Gesture",
             "positive": "+",
-            "negative": "-",
+            "negative": "−",
             "prototypes": "P",
             "spread": "Spread",
             "radius": "Radius",
@@ -471,149 +859,142 @@ class InteractiveGestureApp:
         }
         widths = {
             "gesture": 130,
-            "positive": 40,
-            "negative": 40,
-            "prototypes": 40,
-            "spread": 70,
-            "radius": 70,
-            "input": 70,
+            "positive": 38,
+            "negative": 38,
+            "prototypes": 38,
+            "spread": 65,
+            "radius": 65,
+            "input": 65,
         }
         for column, heading in headings.items():
             self.gesture_table.heading(column, text=heading)
             self.gesture_table.column(
                 column,
                 width=widths[column],
+                minwidth=widths[column],
                 anchor="w" if column == "gesture" else "center",
             )
+        scroll = ttk.Scrollbar(table_wrap, orient="vertical", command=self.gesture_table.yview)
+        self.gesture_table.configure(yscrollcommand=scroll.set)
+        self.gesture_table.grid(row=0, column=0, sticky="nsew")
+        scroll.grid(row=0, column=1, sticky="ns")
 
-        self.gesture_table.grid(row=1, column=0, sticky="nsew")
-
-        management = ttk.LabelFrame(panel, text="Gesture Management", padding=10)
-        management.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        management = self._card(panel, 3, pady=(0, 0))
+        ttk.Label(management, text="SELECTED GESTURE", style="CardTitle.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(0, 8)
+        )
+        controls = ttk.Frame(management, style="Card.TFrame")
+        controls.grid(row=1, column=0, sticky="ew")
         for column in range(2):
-            management.columnconfigure(column, weight=1)
-
+            controls.columnconfigure(column, weight=1)
+        ttk.Button(controls, text="Improve", style="Primary.TButton", command=self.improve_selected_gesture).grid(
+            row=0, column=0, sticky="ew", padx=(0, 4), pady=(0, 5)
+        )
+        ttk.Button(controls, text="Retrain", style="Secondary.TButton", command=self.retrain_selected_gesture).grid(
+            row=0, column=1, sticky="ew", padx=(4, 0), pady=(0, 5)
+        )
+        ttk.Button(controls, text="Rename", style="Secondary.TButton", command=self.rename_selected_gesture).grid(
+            row=1, column=0, sticky="ew", padx=(0, 4), pady=5
+        )
+        ttk.Button(controls, text="Delete", style="Danger.TButton", command=self.delete_selected_gesture).grid(
+            row=1, column=1, sticky="ew", padx=(4, 0), pady=5
+        )
         ttk.Button(
             management,
-            text="Rename",
-            command=self.rename_selected_gesture,
-        ).grid(row=0, column=0, sticky="ew", padx=(0, 4), pady=(0, 5))
-
-        ttk.Button(
-            management,
-            text="Delete",
-            command=self.delete_selected_gesture,
-        ).grid(row=0, column=1, sticky="ew", padx=(4, 0), pady=(0, 5))
-
-        ttk.Button(
-            management,
-            text="Improve (+ samples)",
-            command=self.improve_selected_gesture,
-        ).grid(row=1, column=0, sticky="ew", padx=(0, 4), pady=5)
-
-        ttk.Button(
-            management,
-            text="Retrain (replace samples)",
-            command=self.retrain_selected_gesture,
-        ).grid(row=1, column=1, sticky="ew", padx=(4, 0), pady=5)
-
-        ttk.Button(
-            management,
-            text="Clear All Gesture Memory",
+            text="Clear All Static Gesture Memory",
+            style="Danger.TButton",
             command=self.clear_all_gestures,
-        ).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(5, 0))
-
+        ).grid(row=2, column=0, sticky="ew", pady=(8, 0))
         ttk.Label(
-            panel,
-            text=(
-                "P = number of adaptive prototypes. Improve adds new useful "
-                "examples; Retrain replaces positive examples while preserving "
-                "compatible negative feedback."
-            ),
-            wraplength=440,
-        ).grid(row=3, column=0, sticky="w", pady=(10, 0))
+            management,
+            text="P = adaptive prototypes. +/− = positive and hard-negative examples.",
+            style="CardMuted.TLabel",
+        ).grid(row=3, column=0, sticky="w", pady=(8, 0))
 
     def build_dynamic_tab(self, panel):
+        panel.rowconfigure(4, weight=1)
+        ttk.Label(panel, text="Dynamic Gestures", style="Section.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(2, 2)
+        )
         ttk.Label(
             panel,
-            text="Teach a Dynamic Gesture",
-            font=("Segoe UI", 12, "bold"),
-        ).grid(row=0, column=0, sticky="w")
+            text="Teach movements such as swipe, wave, or circle from live landmark trajectories.",
+            style="PageText.TLabel",
+            wraplength=450,
+        ).grid(row=1, column=0, sticky="w", pady=(0, 12))
 
-        ttk.Label(
-            panel,
-            text=(
-                "Teach movements such as swipe, wave or circle. The app stores "
-                "only normalized landmark trajectories -- no video."
-            ),
-            wraplength=440,
-        ).grid(row=1, column=0, sticky="w", pady=(4, 10))
-
-        ttk.Label(panel, text="Dynamic gesture name").grid(
-            row=2, column=0, sticky="w"
+        teach = self._card(panel, 2)
+        ttk.Label(teach, text="NEW DYNAMIC GESTURE", style="CardTitle.TLabel").grid(
+            row=0, column=0, sticky="w"
         )
         self.dynamic_name_entry = ttk.Entry(
-            panel, textvariable=self.dynamic_name_var
+            teach,
+            textvariable=self.dynamic_name_var,
+            style="Modern.TEntry",
         )
-        self.dynamic_name_entry.grid(row=3, column=0, sticky="ew", pady=(3, 8))
-
+        self.dynamic_name_entry.grid(row=1, column=0, sticky="ew", pady=(7, 8))
         self.dynamic_teach_button = ttk.Button(
-            panel,
+            teach,
             text="Teach Dynamic Gesture",
+            style="Primary.TButton",
             command=self.start_dynamic_teaching,
         )
-        self.dynamic_teach_button.grid(row=4, column=0, sticky="ew")
+        self.dynamic_teach_button.grid(row=2, column=0, sticky="ew")
 
-        demo_controls = ttk.Frame(panel)
-        demo_controls.grid(row=5, column=0, sticky="ew", pady=(8, 0))
+        demo_controls = ttk.Frame(teach, style="Card.TFrame")
+        demo_controls.grid(row=3, column=0, sticky="ew", pady=(8, 0))
         for column in range(3):
             demo_controls.columnconfigure(column, weight=1)
-
         self.dynamic_start_demo_button = ttk.Button(
             demo_controls,
-            text="Start Demo",
+            text="●  Start Demo",
+            style="Primary.TButton",
             command=self.start_dynamic_demo,
             state="disabled",
         )
-        self.dynamic_start_demo_button.grid(
-            row=0, column=0, sticky="ew", padx=(0, 4)
-        )
-
+        self.dynamic_start_demo_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
         self.dynamic_stop_demo_button = ttk.Button(
             demo_controls,
-            text="Stop Demo",
+            text="■  Stop",
+            style="Secondary.TButton",
             command=self.stop_dynamic_demo,
             state="disabled",
         )
-        self.dynamic_stop_demo_button.grid(
-            row=0, column=1, sticky="ew", padx=4
-        )
-
+        self.dynamic_stop_demo_button.grid(row=0, column=1, sticky="ew", padx=4)
         self.dynamic_cancel_button = ttk.Button(
             demo_controls,
             text="Cancel",
+            style="Secondary.TButton",
             command=self.cancel_dynamic_teaching,
             state="disabled",
         )
-        self.dynamic_cancel_button.grid(
-            row=0, column=2, sticky="ew", padx=(4, 0)
-        )
+        self.dynamic_cancel_button.grid(row=0, column=2, sticky="ew", padx=(4, 0))
 
         ttk.Label(
-            panel,
+            teach,
             textvariable=self.dynamic_demo_progress_var,
-        ).grid(row=6, column=0, sticky="w", pady=(8, 2))
+            style="CardText.TLabel",
+        ).grid(row=4, column=0, sticky="w", pady=(10, 2))
         ttk.Label(
-            panel,
+            teach,
             textvariable=self.dynamic_status_var,
-            wraplength=440,
-        ).grid(row=7, column=0, sticky="w", pady=(0, 10))
+            style="CardMuted.TLabel",
+            wraplength=430,
+        ).grid(row=5, column=0, sticky="w")
 
+        table_card = self._card(panel, 3)
+        ttk.Label(table_card, text="LEARNED DYNAMIC GESTURES", style="CardTitle.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(0, 8)
+        )
+        wrap = ttk.Frame(table_card, style="Card.TFrame")
+        wrap.grid(row=1, column=0, sticky="nsew")
+        wrap.columnconfigure(0, weight=1)
+        wrap.rowconfigure(0, weight=1)
         self.dynamic_gesture_table = ttk.Treeview(
-            panel,
+            wrap,
             columns=("gesture", "templates", "threshold", "duration", "input"),
             show="headings",
-            height=9,
+            height=7,
         )
         dynamic_headings = {
             "gesture": "Gesture",
@@ -624,57 +1005,106 @@ class InteractiveGestureApp:
         }
         dynamic_widths = {
             "gesture": 130,
-            "templates": 60,
-            "threshold": 85,
-            "duration": 75,
-            "input": 70,
+            "templates": 55,
+            "threshold": 75,
+            "duration": 70,
+            "input": 65,
         }
         for column, heading in dynamic_headings.items():
             self.dynamic_gesture_table.heading(column, text=heading)
             self.dynamic_gesture_table.column(
                 column,
                 width=dynamic_widths[column],
+                minwidth=dynamic_widths[column],
                 anchor="w" if column == "gesture" else "center",
             )
-        self.dynamic_gesture_table.grid(row=8, column=0, sticky="nsew")
+        dscroll = ttk.Scrollbar(wrap, orient="vertical", command=self.dynamic_gesture_table.yview)
+        self.dynamic_gesture_table.configure(yscrollcommand=dscroll.set)
+        self.dynamic_gesture_table.grid(row=0, column=0, sticky="nsew")
+        dscroll.grid(row=0, column=1, sticky="ns")
 
-        management = ttk.LabelFrame(
-            panel, text="Dynamic Gesture Management", padding=10
+        management = self._card(panel, 4, pady=(0, 0))
+        ttk.Label(management, text="DYNAMIC GESTURE MANAGEMENT", style="CardTitle.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(0, 8)
         )
-        management.grid(row=9, column=0, sticky="ew", pady=(10, 0))
+        buttons = ttk.Frame(management, style="Card.TFrame")
+        buttons.grid(row=1, column=0, sticky="ew")
         for column in range(3):
-            management.columnconfigure(column, weight=1)
+            buttons.columnconfigure(column, weight=1)
+        ttk.Button(buttons, text="Rename", style="Secondary.TButton", command=self.rename_selected_dynamic_gesture).grid(
+            row=0, column=0, sticky="ew", padx=(0, 4)
+        )
+        ttk.Button(buttons, text="Delete", style="Danger.TButton", command=self.delete_selected_dynamic_gesture).grid(
+            row=0, column=1, sticky="ew", padx=4
+        )
+        ttk.Button(buttons, text="Clear All", style="Danger.TButton", command=self.clear_all_dynamic_gestures).grid(
+            row=0, column=2, sticky="ew", padx=(4, 0)
+        )
+        ttk.Label(
+            management,
+            text="Each gesture is learned from three live demonstrations by default; only landmark trajectories are persisted.",
+            style="CardMuted.TLabel",
+            wraplength=430,
+        ).grid(row=2, column=0, sticky="w", pady=(8, 0))
 
-        ttk.Button(
-            management,
-            text="Rename",
-            command=self.rename_selected_dynamic_gesture,
-        ).grid(row=0, column=0, sticky="ew", padx=(0, 4))
-        ttk.Button(
-            management,
-            text="Delete",
-            command=self.delete_selected_dynamic_gesture,
-        ).grid(row=0, column=1, sticky="ew", padx=4)
-        ttk.Button(
-            management,
-            text="Clear All",
-            command=self.clear_all_dynamic_gestures,
-        ).grid(row=0, column=2, sticky="ew", padx=(4, 0))
-
+    def build_settings_tab(self, panel):
+        ttk.Label(panel, text="About & Data", style="Section.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(2, 2)
+        )
         ttk.Label(
             panel,
+            text="Current runtime configuration and privacy-oriented storage design.",
+            style="PageText.TLabel",
+        ).grid(row=1, column=0, sticky="w", pady=(0, 12))
+
+        engine = self._card(panel, 2)
+        ttk.Label(engine, text="RECOGNITION ENGINE", style="CardTitle.TLabel").grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Label(
+            engine,
             text=(
-                "Training: press Start Demo, perform the complete movement once, "
-                "then Stop Demo. Repeat three times. Live recognition starts "
-                "automatically after learning and uses motion onset/offset detection."
+                "MediaPipe hand landmarks\n"
+                "Adaptive multi-prototype few-shot learner\n"
+                "Hard-negative feedback learning\n"
+                "Prediction stabilization\n"
+                "DTW-based dynamic gesture recognition"
             ),
-            wraplength=440,
-        ).grid(row=10, column=0, sticky="w", pady=(10, 0))
+            style="CardText.TLabel",
+        ).grid(row=1, column=0, sticky="w", pady=(7, 0))
+
+        storage = self._card(panel, 3)
+        ttk.Label(storage, text="LOCAL MEMORY", style="CardTitle.TLabel").grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Label(
+            storage,
+            text=(
+                "Static: data/gesture_memory.json\n"
+                "Dynamic: data/dynamic_gesture_memory.json\n\n"
+                "The application persists normalized numerical hand-landmark data. "
+                "It does not intentionally save camera images or videos."
+            ),
+            style="CardText.TLabel",
+            wraplength=430,
+        ).grid(row=1, column=0, sticky="w", pady=(7, 0))
+
+        camera = self._card(panel, 4, pady=(0, 0))
+        ttk.Label(camera, text="CAMERA", style="CardTitle.TLabel").grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Label(
+            camera,
+            text="Capture target: 960 × 540 • UI loop: 15 ms • Up to 2 hands",
+            style="CardText.TLabel",
+        ).grid(row=1, column=0, sticky="w", pady=(7, 0))
 
     def add_stat_row(self, parent, row, label, variable):
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=2)
-        ttk.Label(parent, textvariable=variable).grid(
-            row=row, column=1, sticky="e", pady=2
+        ttk.Label(parent, text=label, style="CardMuted.TLabel").grid(
+            row=row, column=0, sticky="w", pady=3
+        )
+        ttk.Label(parent, textvariable=variable, style="CardText.TLabel").grid(
+            row=row, column=1, sticky="e", pady=3
         )
 
     # ========================================================
@@ -843,6 +1273,8 @@ class InteractiveGestureApp:
             return
 
         self.finish_feedback()
+        if hasattr(self, "pages"):
+            self.show_page("Teach")
         self.prediction_stabilizer.reset()
         self.current_prediction = None
         self.current_raw_prediction = None
