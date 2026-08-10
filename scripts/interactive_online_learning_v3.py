@@ -40,12 +40,22 @@ logger = logging.getLogger(__name__)
 class InteractiveGestureApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Adaptive Real-Time Hand Gesture Recognition — V3.5 Geometry + EVT + Metric + Diverse Memory + Temporal Prototypes")
+        self.root.title("Adaptive Real-Time Hand Gesture Recognition — V3.6 Geometry + EVT + Metric + Diverse Memory + Temporal Prototypes + Async Tasks")
         self.root.geometry("1450x900")
         self.root.minsize(1150, 760)
 
-        # Core engine.
-        self.tracker = HandTracker(max_num_hands=2)
+        # V3.6 tracking backend. MediaPipe Tasks LIVE_STREAM performs landmark
+        # inference asynchronously, while the existing temporal stabilization layer
+        # still produces the same TrackedHand interface used by V3.1-V3.5.
+        self.hand_landmarker_model_path = (
+            PROJECT_ROOT / "data" / "v3" / "models" / "hand_landmarker.task"
+        )
+        self.tracker = HandTracker(
+            max_num_hands=2,
+            model_path=self.hand_landmarker_model_path,
+            auto_download_model=True,
+        )
+        logger.info("V3.6 tracking backend active: %s", self.tracker.backend_name)
 
         # V3.3 learned metric stage.  The encoder is trained once from the
         # existing V3.1/V3.2 raw hybrid landmark memory, persisted, and then
@@ -199,6 +209,9 @@ class InteractiveGestureApp:
         self.current_prediction = None
         self.current_raw_prediction = None
         self.current_hands = []
+        # Latest completed HandLandmarker callback timestamp. Dynamic sampling
+        # uses this to avoid duplicating the same asynchronous result.
+        self.current_tracking_timestamp_ms = None
 
         # Keep the camera preview smooth. Recognition/UI metrics do not need
         # to be recalculated at camera-frame rate. Updating those values less
@@ -227,6 +240,7 @@ class InteractiveGestureApp:
         self.dynamic_target_demos = self.dynamic_learner.minimum_templates
         self.dynamic_sample_interval = 0.04  # ~25 Hz temporal sampling
         self.last_dynamic_sample_time = 0.0
+        self.last_dynamic_tracking_timestamp_ms = None
         self.dynamic_prediction_hold_until = 0.0
 
         # Feedback state.
@@ -1691,6 +1705,7 @@ class InteractiveGestureApp:
         self.dynamic_demo_recording = True
         self.dynamic_demo_observations = [observation]
         self.last_dynamic_sample_time = now
+        self.last_dynamic_tracking_timestamp_ms = self.current_tracking_timestamp_ms
         demo_number = len(self.dynamic_templates) + 1
         self.dynamic_start_demo_button.config(state="disabled")
         self.dynamic_stop_demo_button.config(state="normal")
@@ -1704,7 +1719,13 @@ class InteractiveGestureApp:
             return
         if now - self.last_dynamic_sample_time < self.dynamic_sample_interval:
             return
+        if (
+            self.current_tracking_timestamp_ms is None
+            or self.current_tracking_timestamp_ms == self.last_dynamic_tracking_timestamp_ms
+        ):
+            return
         self.last_dynamic_sample_time = now
+        self.last_dynamic_tracking_timestamp_ms = self.current_tracking_timestamp_ms
 
         observation = build_dynamic_observation(self.current_hands, now)
         if observation is None:
@@ -1792,6 +1813,7 @@ class InteractiveGestureApp:
         self.dynamic_required_signature = None
         self.dynamic_demo_observations = []
         self.dynamic_templates = []
+        self.last_dynamic_tracking_timestamp_ms = None
         self.motion_segmenter.reset()
 
         self.dynamic_name_entry.config(state="normal")
@@ -1900,7 +1922,13 @@ class InteractiveGestureApp:
                 self.dynamic_distance_var.set("Distance: —\nConfidence index: —")
             return
 
+        if (
+            self.current_tracking_timestamp_ms is None
+            or self.current_tracking_timestamp_ms == self.last_dynamic_tracking_timestamp_ms
+        ):
+            return
         self.last_dynamic_sample_time = now
+        self.last_dynamic_tracking_timestamp_ms = self.current_tracking_timestamp_ms
 
         if not self.dynamic_learner.gestures:
             self.motion_segmenter.reset()
@@ -2364,9 +2392,12 @@ class InteractiveGestureApp:
         if success:
             frame = cv2.flip(frame, 1)
 
-            # HandTracker now temporally stabilizes brief 0/1/2-hand changes,
-            # so one physical hand does not flash between modes.
+            # V3.6 submits the mirrored camera frame to MediaPipe Tasks
+            # asynchronously. process() immediately returns the latest completed,
+            # temporally stabilized result instead of blocking the Tk camera loop.
             hands = self.tracker.process(frame)
+            task_diag = self.tracker.diagnostics()
+            self.current_tracking_timestamp_ms = task_diag.latest_timestamp_ms
             self.tracker.draw(frame, hands)
             self.current_hands = hands
 
@@ -2408,6 +2439,11 @@ class InteractiveGestureApp:
                     )
                 else:
                     tracking_text += f" • hybrid {raw_dim}D fallback"
+
+                if task_diag.latest_latency_ms is not None:
+                    tracking_text += f" • async {task_diag.latest_latency_ms:.0f} ms"
+                else:
+                    tracking_text += " • async Tasks"
 
                 self._set_stringvar_if_changed(
                     self.tracking_var,
@@ -2460,7 +2496,7 @@ class InteractiveGestureApp:
 
 def main():
     log_path = configure_logging(PROJECT_ROOT / "logs")
-    logger.info("Starting Adaptive Real-Time Hand Gesture Recognition V3.5")
+    logger.info("Starting Adaptive Real-Time Hand Gesture Recognition V3.6")
     logger.info("Log file: %s", log_path)
 
     root = tk.Tk()
