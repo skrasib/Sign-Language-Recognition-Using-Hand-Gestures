@@ -9,6 +9,15 @@ def _rmse(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.sqrt(np.mean(np.square(a - b))))
 
 
+def _compatible(first: DynamicTrajectory, second: DynamicTrajectory) -> bool:
+    return (
+        first.hand_signature == second.hand_signature
+        and first.shape_sequence.shape[1] == second.shape_sequence.shape[1]
+        and first.motion_sequence.shape[1] == second.motion_sequence.shape[1]
+        and first.velocity_sequence.shape[1] == second.velocity_sequence.shape[1]
+    )
+
+
 def dynamic_local_cost(
     first: DynamicTrajectory,
     i: int,
@@ -52,11 +61,7 @@ def trajectory_dtw_distance(
     The implementation intentionally uses only NumPy, avoiding a new compiled
     dependency in the existing project environment.
     """
-    if first.hand_signature != second.hand_signature:
-        return float("inf")
-    if first.shape_sequence.shape[1] != second.shape_sequence.shape[1]:
-        return float("inf")
-    if first.motion_sequence.shape[1] != second.motion_sequence.shape[1]:
+    if not _compatible(first, second):
         return float("inf")
 
     n = first.length
@@ -118,3 +123,88 @@ def trajectory_dtw_distance(
         return float("inf")
 
     return final_cost / float(path_steps)
+
+
+def trajectory_dtw_alignment(
+    first: DynamicTrajectory,
+    second: DynamicTrajectory,
+    window_ratio: float = 0.20,
+    shape_weight: float = 0.25,
+    motion_weight: float = 0.55,
+    velocity_weight: float = 0.20,
+) -> tuple[float, list[tuple[int, int]]]:
+    """
+    Return the normalized DTW distance and optimal alignment path.
+
+    The regular recognition path uses :func:`trajectory_dtw_distance`, which is
+    memory efficient. V3.5 needs the explicit alignment only when rebuilding a
+    small set of temporal prototypes, so this full dynamic-programming matrix is
+    intentionally kept out of the per-frame prediction path.
+    """
+    if not _compatible(first, second):
+        return float("inf"), []
+
+    n = first.length
+    m = second.length
+    if n == 0 or m == 0:
+        return float("inf"), []
+
+    window = max(
+        abs(n - m),
+        int(math.ceil(max(n, m) * max(float(window_ratio), 0.0))),
+    )
+
+    inf = float("inf")
+    costs = np.full((n + 1, m + 1), inf, dtype=np.float64)
+    predecessor = np.zeros((n + 1, m + 1), dtype=np.uint8)
+    costs[0, 0] = 0.0
+
+    # predecessor codes: 1 diagonal, 2 vertical, 3 horizontal.
+    for i in range(1, n + 1):
+        j_start = max(1, i - window)
+        j_end = min(m, i + window)
+        for j in range(j_start, j_end + 1):
+            choices = (
+                (costs[i - 1, j - 1], 1),
+                (costs[i - 1, j], 2),
+                (costs[i, j - 1], 3),
+            )
+            previous_cost, code = min(choices, key=lambda item: item[0])
+            if not np.isfinite(previous_cost):
+                continue
+
+            local = dynamic_local_cost(
+                first,
+                i - 1,
+                second,
+                j - 1,
+                shape_weight=shape_weight,
+                motion_weight=motion_weight,
+                velocity_weight=velocity_weight,
+            )
+            costs[i, j] = previous_cost + local
+            predecessor[i, j] = code
+
+    if not np.isfinite(costs[n, m]):
+        return float("inf"), []
+
+    path: list[tuple[int, int]] = []
+    i, j = n, m
+    while i > 0 and j > 0:
+        path.append((i - 1, j - 1))
+        code = int(predecessor[i, j])
+        if code == 1:
+            i -= 1
+            j -= 1
+        elif code == 2:
+            i -= 1
+        elif code == 3:
+            j -= 1
+        else:
+            return float("inf"), []
+
+    path.reverse()
+    if not path:
+        return float("inf"), []
+
+    return float(costs[n, m] / len(path)), path

@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 class InteractiveGestureApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Adaptive Real-Time Hand Gesture Recognition — V3.4 Geometry + EVT + Metric + Diverse Memory")
+        self.root.title("Adaptive Real-Time Hand Gesture Recognition — V3.5 Geometry + EVT + Metric + Diverse Memory + Temporal Prototypes")
         self.root.geometry("1450x900")
         self.root.minsize(1150, 760)
 
@@ -115,6 +115,14 @@ class InteractiveGestureApp:
             minimum_threshold=0.045,
             ambiguity_ratio=1.12,
             max_templates=6,
+            temporal_prototype_strategy="dtw_barycenter",
+            max_temporal_prototypes=2,
+            prototype_iterations=4,
+        )
+        logger.info(
+            "V3.5 temporal prototype engine active: strategy=%s max_prototypes=%s",
+            self.dynamic_learner.temporal_prototype_strategy,
+            self.dynamic_learner.max_temporal_prototypes,
         )
         self.motion_segmenter = MotionSegmenter()
 
@@ -1099,13 +1107,14 @@ class InteractiveGestureApp:
         wrap.rowconfigure(0, weight=1)
         self.dynamic_gesture_table = ttk.Treeview(
             wrap,
-            columns=("gesture", "templates", "threshold", "duration", "input"),
+            columns=("gesture", "templates", "prototypes", "threshold", "duration", "input"),
             show="headings",
             height=7,
         )
         dynamic_headings = {
             "gesture": "Gesture",
             "templates": "Demos",
+            "prototypes": "Protos",
             "threshold": "Threshold",
             "duration": "Median s",
             "input": "Input",
@@ -1113,6 +1122,7 @@ class InteractiveGestureApp:
         dynamic_widths = {
             "gesture": 130,
             "templates": 55,
+            "prototypes": 55,
             "threshold": 75,
             "duration": 70,
             "input": 65,
@@ -1149,7 +1159,7 @@ class InteractiveGestureApp:
         )
         ttk.Label(
             management,
-            text="Each gesture is learned from three live demonstrations by default; only landmark trajectories are persisted.",
+            text="Each gesture is learned from three live demonstrations by default. V3.5 derives DTW-aligned temporal prototype(s); only landmark trajectories are persisted.",
             style="CardMuted.TLabel",
             wraplength=430,
         ).grid(row=2, column=0, sticky="w", pady=(8, 0))
@@ -1177,7 +1187,7 @@ class InteractiveGestureApp:
                 "EVT open-set rejection + adaptive multi-prototypes\n"
                 "Hard-negative feedback learning\n"
                 "Prediction stabilization\n"
-                "DTW-based dynamic gesture recognition"
+                "DTW-aligned temporal-prototype dynamic gesture recognition"
             ),
             style="CardText.TLabel",
         ).grid(row=1, column=0, sticky="w", pady=(7, 0))
@@ -1758,7 +1768,8 @@ class InteractiveGestureApp:
 
         message = (
             f"✓ Learned dynamic gesture '{gesture.name}' from "
-            f"{gesture.template_count} demonstrations. "
+            f"{gesture.template_count} demonstrations and "
+            f"{gesture.prototype_count} temporal prototype(s). "
             f"DTW threshold: {gesture.threshold:.4f}."
         )
         if saved:
@@ -1925,7 +1936,7 @@ class InteractiveGestureApp:
                 else "Confidence index: —"
             )
             self.dynamic_distance_var.set(
-                f"DTW distance: {prediction.distance:.4f} / "
+                f"Temporal-prototype DTW: {prediction.distance:.4f} / "
                 f"threshold {prediction.threshold:.4f}\n"
                 + confidence_text
             )
@@ -1944,7 +1955,7 @@ class InteractiveGestureApp:
                     else "Confidence index: —"
                 )
                 self.dynamic_distance_var.set(
-                    f"Nearest DTW distance: {prediction.distance:.4f}\n"
+                    f"Nearest temporal-prototype DTW: {prediction.distance:.4f}\n"
                     + confidence_text
                 )
 
@@ -1962,6 +1973,7 @@ class InteractiveGestureApp:
                 values=(
                     name,
                     gesture.template_count,
+                    gesture.prototype_count,
                     f"{gesture.threshold:.4f}",
                     f"{gesture.median_duration:.2f}",
                     gesture.hand_signature,
@@ -2448,7 +2460,7 @@ class InteractiveGestureApp:
 
 def main():
     log_path = configure_logging(PROJECT_ROOT / "logs")
-    logger.info("Starting Adaptive Real-Time Hand Gesture Recognition V3.4")
+    logger.info("Starting Adaptive Real-Time Hand Gesture Recognition V3.5")
     logger.info("Log file: %s", log_path)
 
     root = tk.Tk()

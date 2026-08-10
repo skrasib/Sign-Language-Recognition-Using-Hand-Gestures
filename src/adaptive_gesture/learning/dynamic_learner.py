@@ -4,6 +4,7 @@ import numpy as np
 
 from adaptive_gesture.features.dynamic_features import DynamicTrajectory
 from adaptive_gesture.learning.dtw import trajectory_dtw_distance
+from adaptive_gesture.learning.temporal_prototypes import build_temporal_prototypes
 
 from adaptive_gesture.learning.confidence import (
     accepted_confidence,
@@ -17,6 +18,7 @@ class DynamicGestureClass:
     name: str
     hand_signature: str
     templates: list[DynamicTrajectory] = field(default_factory=list)
+    temporal_prototypes: list[DynamicTrajectory] = field(default_factory=list)
     reference_distance: float = 0.0
     threshold: float = 0.0
     median_duration: float = 0.0
@@ -24,6 +26,10 @@ class DynamicGestureClass:
     @property
     def template_count(self) -> int:
         return len(self.templates)
+
+    @property
+    def prototype_count(self) -> int:
+        return len(self.temporal_prototypes)
 
 
 @dataclass
@@ -45,9 +51,9 @@ class DynamicGestureLearner:
     """
     Few-shot, class-incremental dynamic gesture learner.
 
-    Each class stores a small set of landmark trajectories. Recognition uses
-    nearest-template multivariate DTW; no neural-network retraining or raw video
-    storage is required.
+    V3.5 adds DTW-aligned temporal barycenter prototypes. Raw video is never
+    stored: only normalized landmark trajectories are retained. The previous
+    nearest-template strategy remains available for controlled ablation tests.
     """
 
     UNKNOWN_LABEL = "UNKNOWN"
@@ -61,6 +67,9 @@ class DynamicGestureLearner:
         max_templates: int = 6,
         duration_ratio_min: float = 0.35,
         duration_ratio_max: float = 2.85,
+        temporal_prototype_strategy: str = "dtw_barycenter",
+        max_temporal_prototypes: int = 2,
+        prototype_iterations: int = 4,
     ):
         self.gestures: dict[str, DynamicGestureClass] = {}
         self.minimum_templates = max(2, int(minimum_templates))
@@ -71,6 +80,15 @@ class DynamicGestureLearner:
         self.duration_ratio_min = float(duration_ratio_min)
         self.duration_ratio_max = float(duration_ratio_max)
 
+        strategy = str(temporal_prototype_strategy).strip().lower()
+        if strategy not in {"templates", "dtw_barycenter"}:
+            raise ValueError(
+                "temporal_prototype_strategy must be 'templates' or 'dtw_barycenter'."
+            )
+        self.temporal_prototype_strategy = strategy
+        self.max_temporal_prototypes = max(1, int(max_temporal_prototypes))
+        self.prototype_iterations = max(1, int(prototype_iterations))
+
     @staticmethod
     def _validate_templates(templates: list[DynamicTrajectory]) -> str:
         if len(templates) < 2:
@@ -79,6 +97,7 @@ class DynamicGestureLearner:
         signature = templates[0].hand_signature
         shape_dimension = templates[0].shape_sequence.shape[1]
         motion_dimension = templates[0].motion_sequence.shape[1]
+        velocity_dimension = templates[0].velocity_sequence.shape[1]
 
         for template in templates:
             if template.hand_signature != signature:
@@ -87,6 +106,8 @@ class DynamicGestureLearner:
                 raise ValueError("Dynamic pose dimensions do not match.")
             if template.motion_sequence.shape[1] != motion_dimension:
                 raise ValueError("Dynamic motion dimensions do not match.")
+            if template.velocity_sequence.shape[1] != velocity_dimension:
+                raise ValueError("Dynamic velocity dimensions do not match.")
 
         return signature
 
@@ -100,16 +121,67 @@ class DynamicGestureLearner:
                     distances.append(float(distance))
         return distances
 
-    def _rebuild(self, gesture: DynamicGestureClass) -> None:
-        distances = self._pairwise_distances(gesture.templates)
-        if not distances:
-            reference = self.minimum_threshold / max(self.threshold_multiplier, 1e-6)
-        else:
-            # With only a few demonstrations, a high percentile is more robust
-            # than the mean to one slightly different but valid performance.
-            reference = float(np.percentile(distances, 90))
+    @staticmethod
+    def _distance_to_representatives(
+        trajectory: DynamicTrajectory,
+        representatives: list[DynamicTrajectory],
+    ) -> float:
+        if not representatives:
+            return float("inf")
+        return min(
+            trajectory_dtw_distance(trajectory, representative)
+            for representative in representatives
+        )
 
-        gesture.reference_distance = max(reference, 1e-6)
+    def _rebuild(self, gesture: DynamicGestureClass) -> None:
+        pairwise_distances = self._pairwise_distances(gesture.templates)
+
+        if self.temporal_prototype_strategy == "dtw_barycenter":
+            prototypes, _ = build_temporal_prototypes(
+                gesture.templates,
+                max_prototypes=self.max_temporal_prototypes,
+                iterations=self.prototype_iterations,
+            )
+            gesture.temporal_prototypes = prototypes
+
+            prototype_distances = [
+                self._distance_to_representatives(template, prototypes)
+                for template in gesture.templates
+            ]
+            prototype_distances = [
+                float(distance)
+                for distance in prototype_distances
+                if np.isfinite(distance)
+            ]
+
+            if prototype_distances:
+                prototype_reference = float(np.percentile(prototype_distances, 90))
+            else:
+                prototype_reference = 0.0
+
+            # Pairwise class spread is approximately twice a center radius for
+            # compact clusters. Keeping half of the old pairwise estimate stops
+            # the new centroid threshold from becoming artificially tiny with
+            # only three near-identical demonstrations.
+            pairwise_reference = (
+                0.5 * float(np.percentile(pairwise_distances, 90))
+                if pairwise_distances
+                else 0.0
+            )
+            reference = max(prototype_reference, pairwise_reference)
+        else:
+            gesture.temporal_prototypes = []
+            if not pairwise_distances:
+                reference = self.minimum_threshold / max(
+                    self.threshold_multiplier, 1e-6
+                )
+            else:
+                reference = float(np.percentile(pairwise_distances, 90))
+
+        if reference <= 0.0:
+            reference = self.minimum_threshold / max(self.threshold_multiplier, 1e-6)
+
+        gesture.reference_distance = max(float(reference), 1e-6)
         gesture.threshold = max(
             gesture.reference_distance * self.threshold_multiplier,
             self.minimum_threshold,
@@ -168,8 +240,8 @@ class DynamicGestureLearner:
 
         gesture.templates.append(template)
         if len(gesture.templates) > self.max_templates:
-            # Keep a small diverse memory: remove the template with the smallest
-            # average distance to the others (most redundant exemplar).
+            # Keep a small diverse trajectory memory: remove the template with
+            # the smallest average DTW distance to the others (most redundant).
             averages = []
             for i, candidate in enumerate(gesture.templates):
                 distances = [
@@ -206,6 +278,16 @@ class DynamicGestureLearner:
     def clear(self) -> None:
         self.gestures.clear()
 
+    def _gesture_representatives(
+        self, gesture: DynamicGestureClass
+    ) -> list[DynamicTrajectory]:
+        if (
+            self.temporal_prototype_strategy == "dtw_barycenter"
+            and gesture.temporal_prototypes
+        ):
+            return gesture.temporal_prototypes
+        return gesture.templates
+
     def predict(self, trajectory: DynamicTrajectory) -> DynamicPrediction:
         if not self.gestures:
             return DynamicPrediction(
@@ -226,10 +308,8 @@ class DynamicGestureLearner:
                 if not (self.duration_ratio_min <= duration_ratio <= self.duration_ratio_max):
                     continue
 
-            distance = min(
-                trajectory_dtw_distance(trajectory, template)
-                for template in gesture.templates
-            )
+            representatives = self._gesture_representatives(gesture)
+            distance = self._distance_to_representatives(trajectory, representatives)
             if not np.isfinite(distance):
                 continue
 
