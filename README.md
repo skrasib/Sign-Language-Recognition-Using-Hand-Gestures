@@ -1,602 +1,1376 @@
-# Adaptive Real-Time Hand Gesture Recognition Using Online Few-Shot Learning
+# Adaptive Real-Time Sign & Gesture Recognition
 
-This repository contains an **adaptive real-time hand gesture recognition system** that can learn new user-defined gestures while the application is running.
+A real-time, personalized hand-gesture recognition system built around **MediaPipe landmarks**, **online few-shot learning**, **open-set recognition**, and **runtime personalization**.
 
-Unlike a conventional gesture classifier that requires a fixed dataset and an offline retraining step whenever a new class is added, this system is designed around **online few-shot learning**. A user can demonstrate a new gesture inside the application, provide only a small number of useful examples, and begin using that gesture immediately.
+This repository started as a conventional static hand-gesture classifier and has evolved into a research-oriented system that can learn **new user-defined static and dynamic gestures while the application is running**, without collecting an offline image/video dataset and without retraining a conventional classifier every time a new gesture is added.
 
-The current implementation supports both **static hand poses** and **dynamic hand movements**, one-hand and two-hand gestures, open-set `UNKNOWN` rejection, interactive feedback, persistent personalized gesture memory, prediction stabilization, and confidence scoring.
-
-> **Current scope:** this project recognizes user-defined hand gestures and gesture trajectories. It is not yet a full continuous natural-language sign-language translator with sentence-level linguistic modeling, facial expression modeling, or body-pose grammar.
-
----
-
-## What makes this project different?
-
-The central idea is:
-
-> **Teach the recognizer a new gesture in seconds, without preparing an offline image/video dataset and without retraining a global classifier.**
-
-The system learns from structured MediaPipe hand landmarks rather than storing raw camera footage. The adaptive memory evolves as the user teaches, confirms, corrects, or rejects predictions.
-
-### Core research contributions implemented in the project
-
-- **Online few-shot class creation** — new gestures are learned during runtime.
-- **Smart Capture** — only stable and informative frames are retained instead of blindly saving every camera frame.
-- **Normalized landmark representation** — reduces sensitivity to hand position and scale.
-- **Adaptive exemplar/prototype memory** — recognition is based on learned examples and prototypes rather than full-model retraining.
-- **Multi-prototype classes** — one gesture can retain multiple natural variations.
-- **Open-set recognition** — unfamiliar poses can be rejected as `UNKNOWN`.
-- **Interactive positive/negative feedback** — `Correct` and `Wrong` actions update gesture memory immediately.
-- **Hard-negative learning** — examples explicitly rejected by the user are remembered as evidence against incorrect classes.
-- **One-hand and two-hand gestures** — both static configurations are supported.
-- **Dynamic gesture learning** — motions such as swipes, waves, and circles can be taught live.
-- **Trajectory-based recognition with DTW** — dynamic gestures are compared as temporal landmark trajectories.
-- **Prediction stabilization** — prevents frame-to-frame label flicker before a prediction is confirmed.
-- **Confidence scoring** — gives an interpretable confidence index based on recognition evidence.
-- **Persistent gesture memory** — learned gestures survive application restarts.
-- **Privacy-oriented storage** — the adaptive memory stores numerical landmark representations rather than raw videos/images.
+> **Current research branch:** `v3-geometry-aware-research`  
+> **Stable V2 branch:** `v2-online-few-shot`
 
 ---
 
-# System overview
+## Table of Contents
 
-The application has two recognition paths that share the same camera and hand-tracking pipeline.
+- [Project Overview](#project-overview)
+- [What Makes This Project Different?](#what-makes-this-project-different)
+- [V2 and V3](#v2-and-v3)
+- [Current V3 Architecture](#current-v3-architecture)
+- [V3 Feature Evolution](#v3-feature-evolution)
+- [How Gesture Data Is Represented](#how-gesture-data-is-represented)
+- [Static Gesture Recognition](#static-gesture-recognition)
+- [Dynamic Gesture Recognition](#dynamic-gesture-recognition)
+- [One-Hand and Two-Hand Gestures](#one-hand-and-two-hand-gestures)
+- [Hands-Free Teaching Workflow](#hands-free-teaching-workflow)
+- [Open-Set Recognition](#open-set-recognition)
+- [Online Feedback and Adaptation](#online-feedback-and-adaptation)
+- [Confidence Index](#confidence-index)
+- [Data Storage and Privacy](#data-storage-and-privacy)
+- [User Interface](#user-interface)
+- [Repository Structure](#repository-structure)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Running the Application](#running-the-application)
+- [First-Time Usage Guide](#first-time-usage-guide)
+- [Testing](#testing)
+- [Optional Qt Frontend](#optional-qt-frontend)
+- [Experimental Web Frontend](#experimental-web-frontend)
+- [Troubleshooting](#troubleshooting)
+- [Research Direction](#research-direction)
+- [Current Limitations](#current-limitations)
+- [Version Summary](#version-summary)
+
+---
+
+# Project Overview
+
+The goal of this project is to make gesture recognition **adaptive and personalized**.
+
+Traditional gesture-recognition systems often follow this workflow:
 
 ```text
-                         Webcam
-                            |
-                            v
-                  OpenCV frame capture
-                            |
-                            v
-                   MediaPipe Hands
-                 21 landmarks per hand
-                            |
-              +-------------+-------------+
-              |                           |
-              v                           v
-       STATIC GESTURES              DYNAMIC GESTURES
-              |                           |
-      normalized geometry          landmark trajectory
-              |                           |
-      Smart Capture / memory       motion segmentation
-              |                           |
-       exemplar + prototypes       temporal resampling
-              |                           |
-      open-set recognition          constrained DTW
-              |                           |
-              +-------------+-------------+
-                            |
-                            v
-                 stabilized prediction
-                            |
-                            v
-                    confidence index
-                            |
-                            v
-                     user feedback
-                            |
-                            v
-                 persistent adaptation
+Collect many images/videos
+        ↓
+Create dataset
+        ↓
+Train classifier/model
+        ↓
+Deploy application
+        ↓
+Need a new gesture?
+        ↓
+Collect more data and retrain
+```
+
+This project instead focuses on:
+
+```text
+Open application
+        ↓
+Show a new gesture
+        ↓
+Give it a name
+        ↓
+Provide only a few demonstrations
+        ↓
+Gesture becomes usable immediately
+```
+
+The application learns from **hand landmarks** rather than storing camera footage.
+
+The current V3 system supports:
+
+- personalized online few-shot learning;
+- one-hand static gestures;
+- two-hand static gestures;
+- one-hand dynamic gestures;
+- two-hand dynamic gestures;
+- geometry-aware hand descriptors;
+- learned metric embeddings;
+- multi-prototype gesture representation;
+- open-set `UNKNOWN` rejection;
+- diversity-aware exemplar memory;
+- hard-negative feedback;
+- temporal prototypes for dynamic gestures;
+- prediction stabilization;
+- confidence scoring;
+- persistent local gesture memory;
+- asynchronous MediaPipe Tasks tracking;
+- hands-free teaching;
+- responsive/scalable desktop UI.
+
+---
+
+# What Makes This Project Different?
+
+The system is designed around a simple research question:
+
+> **Can a real-time gesture recognizer continuously learn personalized gestures from only a few live demonstrations and improve through natural user feedback?**
+
+A new gesture does not require a complete model-training pipeline.
+
+Instead, the application builds a compact representation of the gesture from landmark-based examples and uses metric/prototype-based recognition.
+
+At runtime:
+
+```text
+Camera
+   ↓
+MediaPipe hand landmarks
+   ↓
+Geometry-aware feature representation
+   ↓
+Learned metric embedding
+   ↓
+Few-shot exemplar/prototype memory
+   ↓
+Open-set decision
+   ↓
+Known gesture or UNKNOWN
+```
+
+For dynamic gestures, landmark trajectories are used instead of individual poses.
+
+---
+
+# V2 and V3
+
+This repository currently contains two important research stages.
+
+## V2 — Online Few-Shot Baseline
+
+Branch:
+
+```text
+v2-online-few-shot
+```
+
+V2 represents the stable online few-shot system developed before the V3 research expansion.
+
+It includes:
+
+- normalized MediaPipe landmarks;
+- online static gesture learning;
+- Smart Capture;
+- one-hand and two-hand gestures;
+- multi-prototypes;
+- open-set rejection;
+- hard-negative feedback;
+- prediction stabilization;
+- dynamic gestures using DTW;
+- persistent landmark-only memory;
+- confidence index;
+- gesture management;
+- Tkinter interface.
+
+V2 is preserved as a stable baseline.
+
+---
+
+## V3 — Research-Oriented Expansion
+
+Branch:
+
+```text
+v3-geometry-aware-research
+```
+
+V3 builds on V2 and introduces several additional research components:
+
+```text
+V3.1   Geometry-aware hybrid features
+V3.2   EVT-inspired open-set recognition
+V3.3   Learned metric embedding
+V3.4   Diversity-aware exemplar memory
+V3.5   DTW-aligned temporal prototypes
+V3.6   MediaPipe Tasks asynchronous tracking
+V3.6.1 Robust hand reacquisition
+V3.6.2 Hands-free one/two-hand teaching
+V3.6.3 Responsive/scalable desktop UI
 ```
 
 ---
 
-# How learning works
+# Current V3 Architecture
 
-## Static gestures
-
-When a user teaches a static gesture, the application does **not** train a neural network or retrain a global classifier.
-
-Instead:
-
-1. MediaPipe extracts 21 hand landmarks.
-2. The landmarks are normalized into a geometric feature representation.
-3. Smart Capture filters unstable and duplicate frames.
-4. A small number of useful samples are retained.
-5. The class stores exemplars and prototype representations.
-6. A local acceptance region is estimated from the learned samples.
-7. Recognition starts immediately.
-
-This makes the system closer to **online few-shot exemplar/prototype learning** than conventional batch training.
-
-## Dynamic gestures
-
-Dynamic gestures are represented as sequences of landmark-derived features:
+The static pipeline is approximately:
 
 ```text
-frame 1 -> frame 2 -> frame 3 -> ... -> frame T
+┌──────────────────────────┐
+│        Camera Frame      │
+└────────────┬─────────────┘
+             ↓
+┌──────────────────────────┐
+│ MediaPipe Tasks          │
+│ HandLandmarker           │
+│ LIVE_STREAM / async      │
+└────────────┬─────────────┘
+             ↓
+┌──────────────────────────┐
+│ Tracking Stabilization   │
+│ • hand-count hysteresis  │
+│ • smoothing              │
+│ • handedness stability   │
+│ • reacquisition logic    │
+└────────────┬─────────────┘
+             ↓
+┌──────────────────────────┐
+│ 21 hand landmarks        │
+│ x, y, z coordinates      │
+└────────────┬─────────────┘
+             ↓
+┌──────────────────────────┐
+│ Geometry-Aware Features  │
+│ • normalized XYZ         │
+│ • joint angles           │
+│ • two-hand geometry      │
+└────────────┬─────────────┘
+             ↓
+┌──────────────────────────┐
+│ Learned Metric Encoder   │
+│ hybrid representation    │
+│ → compact embedding      │
+└────────────┬─────────────┘
+             ↓
+┌──────────────────────────┐
+│ Online Gesture Memory    │
+│ • exemplars              │
+│ • multi-prototypes       │
+│ • diversity selection    │
+│ • hard negatives         │
+└────────────┬─────────────┘
+             ↓
+┌──────────────────────────┐
+│ EVT-Inspired Open Set    │
+│ inclusion / rejection    │
+└────────────┬─────────────┘
+             ↓
+┌──────────────────────────┐
+│ Prediction Stabilizer    │
+└────────────┬─────────────┘
+             ↓
+      Gesture / UNKNOWN
 ```
 
-A user provides a few live demonstrations. The application stores numerical trajectories, performs temporal normalization/resampling, and compares new movements to learned examples using **Dynamic Time Warping (DTW)**.
+Dynamic recognition uses a parallel temporal branch:
 
-No video dataset is required for adding a new movement class.
-
----
-
-# Technology stack
-
-| Component | Technology |
-|---|---|
-| Language | Python 3.11 |
-| Package / environment manager | `uv` |
-| Main desktop frontend | Tkinter / `ttk` |
-| Experimental desktop frontend | PySide6 / Qt (WIP) |
-| Experimental web frontend | Next.js-based design lab (WIP) |
-| Camera capture | OpenCV |
-| Hand tracking | MediaPipe Hands |
-| Numerical processing | NumPy |
-| Image display | Pillow |
-| Static recognition | Custom online exemplar / multi-prototype learner |
-| Dynamic recognition | Custom multivariate DTW pipeline |
-| Persistence | JSON landmark memory |
-| Tests | pytest |
-| CI | GitHub Actions |
+```text
+Tracked landmarks
+      ↓
+Motion segmentation
+      ↓
+Trajectory representation
+      ↓
+DTW alignment
+      ↓
+Temporal prototype(s)
+      ↓
+Dynamic gesture / UNKNOWN
+```
 
 ---
 
-# Repository structure
+# V3 Feature Evolution
 
-The most important parts of the current V2 implementation are:
+## V3.1 — Geometry-Aware Hybrid Features
+
+The original landmark representation primarily described **where joints are located**.
+
+V3.1 additionally describes **how the hand is shaped**.
+
+MediaPipe provides 21 landmarks:
+
+```text
+21 landmarks × x,y,z = 63 coordinate values
+```
+
+V3 adds joint-angle information.
+
+For one hand:
+
+```text
+Normalized XYZ coordinates
+        +
+Geometry-aware joint angles
+        ↓
+Hybrid descriptor
+```
+
+This improves robustness to variations such as:
+
+- hand rotation;
+- hand tilt;
+- small viewpoint changes;
+- distance changes;
+- natural pose variation.
+
+The idea is inspired by geometry-aware few-shot sign-recognition research, while the implementation is adapted to this project's online personalized-learning setting.
+
+---
+
+## V3.2 — EVT-Inspired Open-Set Recognition
+
+A real-world recognizer should not force every hand pose into one of the learned classes.
+
+Example:
+
+```text
+Learned:
+Victory
+Three
+Fist
+
+Input:
+completely different pose
+```
+
+Desired result:
+
+```text
+UNKNOWN
+```
+
+V3.2 adds an Extreme Value Theory-inspired open-set layer that models the boundary around known gesture examples using negative evidence.
+
+This works together with:
+
+- competing gesture classes;
+- hard negatives;
+- learned metric distances;
+- class-specific acceptance behavior.
+
+The current implementation is **EVM-inspired**, not a complete reproduction of the canonical Extreme Value Machine algorithm.
+
+---
+
+## V3.3 — Learned Metric Embedding
+
+Instead of comparing the full handcrafted feature vector directly, V3.3 learns a compact feature space.
+
+Conceptually:
+
+```text
+Hybrid geometry
+      ↓
+Small learned metric encoder
+      ↓
+Compact embedding
+      ↓
+Prototype/exemplar comparison
+```
+
+The metric-learning objective encourages:
+
+```text
+same gesture   → close together
+different      → farther apart
+```
+
+After the encoder is learned, normal runtime gesture teaching still remains lightweight:
+
+```text
+New gesture
+   ↓
+Frozen encoder
+   ↓
+Few embeddings
+   ↓
+New prototype/exemplar memory
+```
+
+A full classifier is not retrained every time the user adds a gesture.
+
+---
+
+## V3.4 — Diversity-Aware Exemplar Memory
+
+Gesture memory is bounded.
+
+A simple FIFO system eventually removes the oldest examples, even when an old sample represents a useful variation.
+
+V3.4 instead prefers a representative subset.
+
+It keeps:
+
+- central examples;
+- diverse variations;
+- useful boundary examples.
+
+Conceptually:
+
+```text
+Many stored examples
+       ↓
+Select representative core set
+       ↓
+Keep useful diversity
+```
+
+Hard-negative memory also prioritizes:
+
+- negatives near a class boundary;
+- diverse mistakes;
+- non-redundant negative evidence.
+
+---
+
+## V3.5 — Temporal Prototypes
+
+Dynamic gestures are trajectories rather than single hand poses.
+
+Instead of relying only on individual stored demonstrations:
+
+```text
+Demo 1
+Demo 2
+Demo 3
+```
+
+V3.5 uses DTW alignment to construct a representative motion prototype.
+
+```text
+Demo 1 ─┐
+Demo 2 ─┼─ DTW alignment → temporal prototype
+Demo 3 ─┘
+```
+
+This is a lightweight **DTW-barycenter / DBA-style** temporal representation.
+
+The implementation does not currently claim to be Soft-DTW.
+
+Multiple temporal prototypes may be used when a gesture contains clearly different motion styles.
+
+---
+
+## V3.6 — MediaPipe Tasks Asynchronous Tracking
+
+V3.6 modernizes the landmark-extraction pipeline.
+
+Instead of synchronously blocking the UI while processing every frame, the application uses MediaPipe Tasks `HandLandmarker` in live-stream mode.
+
+```text
+Camera / UI
+    │
+    ├──────────── continues rendering
+    │
+    └── async frame submission
+             ↓
+       HandLandmarker
+             ↓
+          callback
+             ↓
+       latest landmarks
+```
+
+Benefits include:
+
+- cleaner separation between UI and tracking;
+- lower risk of UI blocking;
+- modern MediaPipe Tasks API;
+- more suitable live-stream architecture.
+
+---
+
+## V3.6.1 — Hand Reacquisition
+
+A tracking issue occurred when a hand completely left the camera and later returned.
+
+V3.6.1 adds a short reacquisition procedure so stale or unstable hand identity does not poison the recognition state.
+
+```text
+Hand disappears
+      ↓
+tracking state cleared
+      ↓
+hand returns
+      ↓
+short fresh-result warm-up
+      ↓
+recognition resumes
+```
+
+---
+
+## V3.6.2 — Hands-Free Teaching
+
+Two-hand gestures are difficult to teach if the user must continuously operate a mouse.
+
+The application now allows the user to configure the gesture first:
+
+```text
+Gesture name
+Static / Dynamic
+One hand / Two hands
+```
+
+After pressing Start once, capture becomes hands-free.
+
+For a two-hand gesture:
+
+```text
+Start Teaching
+     ↓
+WAITING FOR 2 HANDS
+     ↓
+both hands detected consistently
+     ↓
+HOLD STEADY
+     ↓
+READY
+     ↓
+CAPTURING
+```
+
+The system does not begin recording a two-hand gesture when only one hand is detected.
+
+Dynamic gestures can progress through multiple demonstrations without repeatedly touching the mouse.
+
+---
+
+## V3.6.3 — Responsive UI
+
+The primary Tkinter interface is responsive rather than relying on a single hard-coded desktop size.
+
+The interface now adapts to:
+
+- different screen resolutions;
+- maximize/restore;
+- smaller window sizes;
+- different camera-panel sizes.
+
+The camera maintains aspect ratio, and right-side pages can scroll vertically when necessary.
+
+---
+
+# How Gesture Data Is Represented
+
+The application does **not train directly on the RGB camera image**.
+
+The camera is used by MediaPipe to locate the hands.
+
+For each hand, MediaPipe returns:
+
+```text
+21 landmarks
+```
+
+Each landmark contains:
+
+```text
+x
+y
+z
+```
+
+Example:
+
+```text
+Wrist       → (x, y, z)
+Thumb tip   → (x, y, z)
+Index tip   → (x, y, z)
+...
+Pinky tip   → (x, y, z)
+```
+
+The project then converts those landmarks into a normalized numerical representation.
+
+This means recognition operates primarily on:
+
+```text
+hand geometry
+```
+
+rather than:
+
+```text
+raw RGB pixels
+```
+
+---
+
+# Static Gesture Recognition
+
+Static gestures are poses such as:
+
+```text
+Victory
+Fist
+Three
+OK
+Point
+```
+
+The teaching process is roughly:
+
+```text
+Show gesture
+      ↓
+MediaPipe landmarks
+      ↓
+Hybrid geometry
+      ↓
+Smart Capture
+      ↓
+Metric embeddings
+      ↓
+Exemplars / prototypes
+      ↓
+Immediately available for recognition
+```
+
+---
+
+## Smart Capture
+
+Camera frames are highly redundant.
+
+If the user holds a pose for several seconds, hundreds of nearly identical frames could be produced.
+
+Smart Capture attempts to keep only useful examples.
+
+It filters:
+
+- unstable frames;
+- highly redundant duplicates;
+- unnecessary near-identical observations.
+
+Conceptually:
+
+```text
+48 observed frames
+
+→ unstable frames removed
+→ duplicates removed
+
+→ useful diverse samples retained
+```
+
+This keeps teaching fast and memory compact.
+
+---
+
+# Dynamic Gesture Recognition
+
+Dynamic gestures contain movement.
+
+Examples:
+
+```text
+Swipe Left
+Swipe Right
+Circle
+Wave
+Salute motion
+```
+
+The application stores numerical landmark trajectories instead of video.
+
+A dynamic demonstration contains:
+
+```text
+frame 1 landmarks
+frame 2 landmarks
+frame 3 landmarks
+...
+frame N landmarks
+```
+
+The system uses:
+
+- motion segmentation;
+- temporal normalization;
+- trajectory features;
+- DTW alignment;
+- temporal prototypes;
+- open-set rejection.
+
+Because DTW aligns sequences in time, a gesture can still match when the user performs it somewhat faster or slower.
+
+---
+
+# One-Hand and Two-Hand Gestures
+
+Each taught gesture has a required hand configuration.
+
+Examples:
+
+```text
+Victory
+required_hands = 1
+
+Heart
+required_hands = 2
+```
+
+This information is used during both teaching and recognition.
+
+For teaching:
+
+```text
+One-hand gesture
+→ capture only after one hand is ready
+
+Two-hand gesture
+→ capture only after both hands are ready
+```
+
+For recognition, hand-count metadata helps prevent unnecessary comparisons between incompatible gesture classes.
+
+Two-hand features additionally encode relationships between the hands.
+
+---
+
+# Hands-Free Teaching Workflow
+
+## Static — One Hand
+
+```text
+1. Open Teach
+2. Enter gesture name
+3. Select One hand
+4. Press Start Teaching
+5. Put hand in view
+6. Wait for READY
+7. Hold gesture
+8. Smart Capture collects useful examples
+9. Gesture is learned
+```
+
+---
+
+## Static — Two Hands
+
+```text
+1. Open Teach
+2. Enter gesture name
+3. Select Two hands
+4. Press Start Teaching
+5. App displays WAITING FOR 2 HANDS
+6. Put both hands in view
+7. Keep them stable briefly
+8. App begins capture automatically
+9. Gesture is learned
+```
+
+If one hand disappears during capture, capture is paused instead of silently learning an incorrect one-hand sample.
+
+---
+
+## Dynamic — Hands-Free
+
+```text
+1. Open Dynamic
+2. Enter gesture name
+3. Select One hand or Two hands
+4. Press Start Hands-Free Teaching once
+5. Wait for required hand count
+6. Hold start position
+7. App displays READY — START MOVING
+8. Perform movement
+9. Stop naturally
+10. Demo is accepted automatically
+11. Return to starting state
+12. Repeat until all demonstrations are complete
+```
+
+---
+
+# Open-Set Recognition
+
+The application supports:
+
+```text
+KNOWN
+```
+
+and:
+
+```text
+UNKNOWN
+```
+
+This matters because a gesture recognizer should not classify every arbitrary hand pose as the nearest known class.
+
+V3 combines:
+
+- learned metric distance;
+- positive class geometry;
+- negative class evidence;
+- hard negatives;
+- EVT-inspired inclusion scoring;
+- ambiguity handling.
+
+---
+
+# Online Feedback and Adaptation
+
+The application supports natural correction.
+
+## Correct Prediction
+
+If the system recognizes:
+
+```text
+Victory
+```
+
+and the prediction is correct:
+
+```text
+✓ Correct
+```
+
+the current example can become additional positive evidence for `Victory`.
+
+---
+
+## Wrong Prediction
+
+Suppose:
+
+```text
+Prediction: Victory
+Actual: Three
+```
+
+The user can choose:
+
+```text
+✕ Wrong
+→ Actual gesture: Three
+```
+
+That example becomes:
+
+```text
+positive evidence for Three
++
+hard-negative evidence for Victory
+```
+
+This lets the recognition boundary adapt to the specific user.
+
+The system can therefore become more personalized through interaction.
+
+---
+
+# Confidence Index
+
+The UI displays a:
+
+```text
+Confidence index: XX%
+```
+
+This should **not currently be interpreted as a calibrated probability**.
+
+It is a combined recognition-confidence index derived from signals such as:
+
+- distance relative to the learned class boundary;
+- separation from competing classes;
+- hard-negative evidence;
+- dynamic ambiguity;
+- open-set evidence.
+
+Formal probability calibration is part of future evaluation work.
+
+---
+
+# Data Storage and Privacy
+
+The recognition system does not need to store training photos or videos.
+
+Persistent gesture memory contains numerical representations such as:
+
+```text
+normalized landmark features
+metric embeddings
+gesture metadata
+hard-negative examples
+dynamic landmark trajectories
+```
+
+Camera frames are used for live processing and are not required as the learned gesture database.
+
+Typical V3 runtime data is stored under:
+
+```text
+data/v3/
+```
+
+Examples may include:
+
+```text
+gesture_memory_hybrid.json
+gesture_memory_metric_v33.json
+dynamic_gesture_memory.json
+metric_encoder_v33.npz
+models/hand_landmarker.task
+```
+
+These runtime files are intended to remain local and are excluded from version control.
+
+---
+
+# User Interface
+
+The primary interface is currently built with **Tkinter**.
+
+Main sections:
+
+```text
+Live
+Teach
+Library
+Dynamic
+About
+```
+
+## Live
+
+Shows:
+
+- camera feed;
+- MediaPipe landmarks;
+- current recognized gesture;
+- confidence index;
+- open-set information;
+- correct/wrong feedback controls.
+
+## Teach
+
+Used to teach static gestures.
+
+Supports:
+
+- gesture naming;
+- one/two-hand selection;
+- hands-free readiness;
+- Smart Capture;
+- improve/retrain flows.
+
+## Library
+
+Used to manage learned gestures.
+
+Typical actions include:
+
+```text
+Improve
+Retrain
+Rename
+Delete
+Clear
+```
+
+## Dynamic
+
+Used to:
+
+- teach dynamic gestures;
+- select one/two-hand input;
+- perform hands-free demonstrations;
+- view demo/prototype information;
+- manage learned dynamic gestures.
+
+## About
+
+Contains project and privacy information.
+
+---
+
+# Repository Structure
+
+The exact structure may evolve, but the important V3 components are organized approximately as follows:
 
 ```text
 Sign-Language-Recognition-Using-Hand-Gestures/
-|
-|-- scripts/
-|   |-- interactive_online_learning.py        # Primary Tkinter application
-|   |-- interactive_online_learning_qt.py     # Experimental Qt frontend (WIP)
-|   |-- test_confidence_scoring.py
-|   |-- test_dynamic_gesture_engine.py
-|   `-- ...
-|
-|-- src/adaptive_gesture/
-|   |-- features/
-|   |   |-- normalizer.py
-|   |   |-- similarity.py
-|   |   |-- hand_features.py
-|   |   `-- dynamic_features.py
-|   |
-|   |-- learning/
-|   |   |-- online_learner.py
-|   |   |-- sample_selector.py
-|   |   |-- prediction_stabilizer.py
-|   |   |-- confidence.py
-|   |   |-- dtw.py
-|   |   |-- dynamic_learner.py
-|   |   `-- motion_segmenter.py
-|   |
-|   |-- storage/
-|   |   |-- gesture_store.py
-|   |   `-- dynamic_gesture_store.py
-|   |
-|   |-- tracking/
-|   |   `-- hand_tracker.py
-|   |
-|   `-- utils/
-|
-|-- tests/                                     # Automated unit/integration tests
-|-- frontend-design-lab/                       # Experimental web UI (WIP)
-|-- data/                                      # Local learned gesture memory (ignored by Git)
-|-- logs/                                      # Runtime logs (ignored by Git)
-|-- FRONTEND_WIP.md
-|-- pyproject.toml
-|-- uv.lock
-|-- .python-version
-`-- README.md
+│
+├── scripts/
+│   ├── interactive_online_learning.py
+│   ├── interactive_online_learning_v3.py
+│   ├── interactive_online_learning_qt.py
+│   ├── train_v3_metric_encoder.py
+│   ├── test_v3_metric_embedding.py
+│   ├── test_v3_open_set.py
+│   ├── test_v3_diversity_memory.py
+│   ├── test_v3_temporal_prototypes.py
+│   ├── test_v3_tasks_backend.py
+│   └── download_v3_hand_landmarker_model.py
+│
+├── src/
+│   └── adaptive_gesture/
+│       ├── features/
+│       │   ├── normalizer.py
+│       │   ├── similarity.py
+│       │   ├── hand_features.py
+│       │   ├── geometry_features.py
+│       │   └── dynamic_features.py
+│       │
+│       ├── learning/
+│       │   ├── online_learner.py
+│       │   ├── sample_selector.py
+│       │   ├── prediction_stabilizer.py
+│       │   ├── confidence.py
+│       │   ├── evt_open_set.py
+│       │   ├── metric_embedding.py
+│       │   ├── metric_runtime.py
+│       │   ├── exemplar_memory.py
+│       │   ├── dtw.py
+│       │   ├── dynamic_learner.py
+│       │   ├── motion_segmenter.py
+│       │   ├── temporal_prototypes.py
+│       │   └── teaching_flow.py
+│       │
+│       ├── storage/
+│       │   ├── gesture_store.py
+│       │   └── dynamic_gesture_store.py
+│       │
+│       ├── tracking/
+│       │   ├── hand_tracker.py
+│       │   ├── task_runtime.py
+│       │   └── model_assets.py
+│       │
+│       ├── ui/
+│       └── utils/
+│
+├── tests/
+├── docs/
+├── frontend-design-lab/
+├── data/                  # local runtime data, ignored
+├── logs/                  # local logs, ignored
+│
+├── pyproject.toml
+├── uv.lock
+├── .python-version
+└── README.md
 ```
-
-> The two experimental frontends are intentionally marked **WIP**. The Tkinter application is currently the primary supported interface.
 
 ---
 
-# Quick start
+# Requirements
 
-## 1. Install Git
+Recommended environment:
 
-If Git is not installed, install it from the official Git distribution for your operating system.
-
-Verify:
-
-```powershell
-git --version
+```text
+Windows 10/11
+Python 3.11.9
+Webcam
 ```
 
-## 2. Install `uv`
+The project uses `uv` for Python environment and dependency management.
 
-This project uses **Astral uv** for Python version management, dependency resolution, virtual environments, and reproducible installs.
+Install `uv` first if necessary:
 
-After installing `uv`, verify:
+```powershell
+winget install --id=astral-sh.uv -e
+```
+
+Verify:
 
 ```powershell
 uv --version
 ```
 
-## 3. Clone the repository
+---
+
+# Installation
+
+## 1. Clone the Repository
 
 ```powershell
 git clone https://github.com/skrasib/Sign-Language-Recognition-Using-Hand-Gestures.git
 cd Sign-Language-Recognition-Using-Hand-Gestures
 ```
 
-## 4. Switch to the V2 branch
+---
 
-The adaptive online-learning implementation currently lives on:
+## 2. Choose the Branch
+
+For the current V3 research system:
+
+```powershell
+git switch v3-geometry-aware-research
+```
+
+For the stable V2 baseline:
 
 ```powershell
 git switch v2-online-few-shot
 ```
 
-If the branch is not available locally yet:
+---
 
-```powershell
-git fetch origin
-git switch -c v2-online-few-shot --track origin/v2-online-few-shot
-```
-
-## 5. Install the required Python version
-
-The project is pinned to Python **3.11.9**.
+## 3. Install Python 3.11.9
 
 ```powershell
 uv python install 3.11.9
 ```
 
-The repository contains `.python-version`, so `uv` will use the configured Python version for the project.
+The repository also contains:
 
-## 6. Install the application dependencies
+```text
+.python-version
+```
 
-For the primary Tkinter application plus development/test tools:
+to document the intended Python version.
+
+---
+
+## 4. Create / Sync the Environment
+
+For the primary Tkinter application and development tools:
 
 ```powershell
 uv sync --extra dev
 ```
 
-This creates/updates the local `.venv` automatically from `pyproject.toml` and `uv.lock`.
+This automatically creates the `.venv` environment if required.
 
-You do **not** need to manually activate the environment when using `uv run`.
+You normally do **not** need to activate the environment manually when using `uv run`.
 
-## 7. Run the automated tests
+---
 
-On most systems:
+## 5. Optional Qt Dependencies
 
-```powershell
-uv run pytest
-```
+The Qt frontend is experimental and not the primary application.
 
-If Windows denies access to pytest's normal temporary directory, use the project-local test directory:
+To install it too:
 
 ```powershell
-uv run pytest --basetemp=.pytest_tmp
+uv sync --extra dev --extra qt
 ```
 
-The current automated suite is expected to pass before normal use.
+---
 
-## 8. Start the primary application
+# Running the Application
+
+## Current V3 Application
+
+```powershell
+uv run python scripts\interactive_online_learning_v3.py
+```
+
+This is the recommended application on:
+
+```text
+v3-geometry-aware-research
+```
+
+---
+
+## V2 Application
 
 ```powershell
 uv run python scripts\interactive_online_learning.py
 ```
 
-Allow access to your webcam if Windows or your security software asks for permission.
-
 ---
 
-# First-time usage
+# First-Time Usage Guide
 
-The application is intentionally able to start with **no predefined gesture vocabulary**.
+## 1. Start the Application
 
-You create the vocabulary yourself.
-
-## Teach your first static gesture
-
-1. Launch the application.
-2. Open the **Teach** section.
-3. Select/static teaching if the interface asks for the gesture type.
-4. Enter a gesture name, for example:
-
-   ```text
-   Victory
-   ```
-
-5. Click **Teach Gesture**.
-6. Position your hand naturally in front of the webcam.
-7. Hold the intended gesture steadily.
-8. Make very small natural variations while keeping the same semantic gesture.
-9. Smart Capture will automatically:
-   - ignore unstable frames;
-   - ignore near-duplicates;
-   - keep useful examples.
-10. Once enough useful samples have been collected, finish teaching or allow the automatic completion threshold to finish it.
-11. Return to the live recognition view.
-12. Show the gesture again.
-
-The new class should now be recognized immediately.
-
-No separate training script, notebook, offline image collection process, or application restart is required.
-
----
-
-# Smart Capture
-
-A webcam can produce dozens of almost-identical frames while a user holds one pose. Saving all of those frames does not necessarily create useful diversity.
-
-Smart Capture therefore evaluates candidate samples and tries to retain only examples that are:
-
-- sufficiently stable;
-- not near-duplicates of already accepted samples;
-- representative of natural variation in the demonstrated gesture.
-
-During teaching, the UI displays statistics such as:
-
-```text
-Frames observed
-Useful samples
-Duplicates ignored
-Unstable samples ignored
-Current stability
+```powershell
+uv run python scripts\interactive_online_learning_v3.py
 ```
 
-This is why the number of retained training samples can be much smaller than the number of frames observed by the webcam.
+The webcam should open automatically.
+
+On the first V3.6 run, the application may need the MediaPipe Hand Landmarker model.
+
+It is stored locally at approximately:
+
+```text
+data/v3/models/hand_landmarker.task
+```
+
+The helper logic can download/reuse this model.
 
 ---
 
-# Static recognition and `UNKNOWN`
+## 2. Teach Your First Static Gesture
 
-The system is **open-set aware**.
+Open:
 
-That means it does not have to force every hand pose into one of the learned classes.
+```text
+Teach
+```
 
-For each compatible class, the recognizer evaluates how close the current features are to learned positive examples/prototypes and whether the sample falls inside the learned acceptance region.
+Enter a name, for example:
 
-If the evidence is insufficient, the result becomes:
+```text
+Victory
+```
+
+Choose:
+
+```text
+One hand
+```
+
+Press:
+
+```text
+Start Teaching
+```
+
+Place the hand in view.
+
+The application waits until the required hand configuration is stable and then begins Smart Capture.
+
+Once enough useful samples are collected, the gesture becomes available for recognition.
+
+---
+
+## 3. Teach a Two-Hand Gesture
+
+Example:
+
+```text
+Heart
+```
+
+Choose:
+
+```text
+Two hands
+```
+
+Press Start once.
+
+The app should display:
+
+```text
+WAITING FOR 2 HANDS
+```
+
+It will not start teaching from only one visible hand.
+
+Bring both hands into view and hold them stable.
+
+Capture then begins automatically.
+
+---
+
+## 4. Test Recognition
+
+Open:
+
+```text
+Live
+```
+
+Show one of the taught gestures.
+
+The interface should display:
+
+```text
+Gesture: Victory
+Confidence index: ...
+```
+
+An unrecognized pose should ideally appear as:
 
 ```text
 UNKNOWN
 ```
 
-This is especially important for a customizable system because users may show poses that have never been taught.
+---
+
+## 5. Correct the System
+
+When correct:
+
+```text
+✓ Correct
+```
+
+When incorrect:
+
+```text
+✕ Wrong
+```
+
+Then specify the actual gesture or mark the input as unknown.
+
+This feedback updates the personalized gesture memory.
 
 ---
 
-# Interactive feedback
+## 6. Teach a Dynamic Gesture
 
-The live UI includes feedback controls so the system can continue adapting after the initial teaching phase.
-
-## Correct prediction
-
-If the prediction is correct:
+Open:
 
 ```text
-[ Correct ]
+Dynamic
 ```
 
-The current example can be added as additional positive evidence for that class.
+Enter a gesture name.
 
-## Wrong prediction
-
-If the application predicts the wrong learned class:
+Choose:
 
 ```text
-[ Wrong ]
+One hand
 ```
 
-Choose the actual gesture and apply the correction.
-
-Conceptually, the captured example becomes:
+or:
 
 ```text
-positive evidence  -> actual class
-negative evidence  -> incorrectly predicted class
+Two hands
 ```
 
-## Unknown pose
-
-If a pose belongs to none of the learned classes, use:
+Press:
 
 ```text
-This Gesture Is Unknown
+Start Hands-Free Teaching
 ```
 
-When appropriate, the example becomes a **hard negative** for the incorrectly predicted class.
+Wait until:
 
-This allows class boundaries to improve through normal interaction without retraining all existing classes.
+```text
+READY — START MOVING
+```
+
+Perform the motion naturally and stop.
+
+The application automatically progresses through the required demonstrations.
 
 ---
 
-# Multi-prototype learning
+# Testing
 
-A single gesture can legitimately look different across natural wrist rotations, small orientation changes, or different comfortable hand configurations.
-
-Instead of forcing all variation into one single class center, the adaptive learner can maintain several prototypes for a gesture.
-
-Conceptually:
-
-```text
-Victory
-|-- prototype A: front-facing
-|-- prototype B: slight wrist rotation
-`-- prototype C: another stable variant
-```
-
-This increases within-class flexibility while preserving open-set rejection.
-
----
-
-# One-hand and two-hand gestures
-
-The system supports both:
-
-```text
-one hand  -> normalized single-hand representation
-both hands -> combined two-hand representation
-```
-
-For two-hand gestures, the representation preserves information from both hand shapes as well as their relative configuration.
-
-When teaching a two-hand gesture, keep both hands visible throughout the Smart Capture phase.
-
----
-
-# Teach a dynamic gesture
-
-Dynamic gestures are movements rather than single fixed poses.
-
-Examples include:
-
-- Swipe Left
-- Swipe Right
-- Wave
-- Circle
-- other user-defined one-hand or two-hand motions
-
-## Recommended teaching flow
-
-1. Open the **Dynamic Gestures** section.
-2. Enter a name such as:
-
-   ```text
-   Swipe Right
-   ```
-
-3. Start dynamic teaching.
-4. Start the first demonstration.
-5. Perform the movement once from a clear start state to a clear end state.
-6. Stop the demonstration.
-7. Repeat for the requested number of demonstrations.
-8. Finish learning.
-9. Return to the live view.
-10. Perform the movement naturally.
-
-The system will detect the movement segment and compare it with the learned trajectories.
-
----
-
-# Dynamic recognition pipeline
-
-Dynamic recognition uses a different mechanism from static pose recognition.
-
-```text
-Hand tracking
-    |
-    v
-Temporal landmark features
-    |
-    v
-Motion detection / segmentation
-    |
-    v
-Trajectory smoothing / resampling
-    |
-    v
-Constrained multivariate DTW
-    |
-    v
-Known gesture or UNKNOWN
-```
-
-**Dynamic Time Warping (DTW)** allows two demonstrations of the same movement to be aligned even when one is performed somewhat faster or slower than the other.
-
-The implementation also applies rejection/ambiguity checks so unrelated motion is not automatically forced into the nearest dynamic class.
-
----
-
-# Prediction stabilization
-
-Raw frame-by-frame recognition can flicker because tracking noise may briefly change the nearest class.
-
-The application therefore separates:
-
-```text
-raw candidate prediction
-        |
-        v
-stabilization logic
-        |
-        v
-confirmed UI prediction
-```
-
-A class must remain sufficiently consistent before it replaces the currently confirmed result.
-
-This improves visual stability without changing the underlying class memory.
-
----
-
-# Confidence index
-
-The UI reports a **confidence index**, not a calibrated probability.
-
-The score is derived from recognition evidence such as:
-
-- distance to the learned positive region;
-- separation from competing classes;
-- negative/hard-negative evidence;
-- dynamic-match ambiguity for trajectory recognition.
-
-For example:
-
-```text
-Victory
-Confidence: 92%
-```
-
-should be interpreted as a relative confidence indicator produced by the current recognizer, **not** as a statement that the statistical probability of correctness is exactly 92%.
-
-Formal probability calibration would require a dedicated held-out evaluation dataset.
-
----
-
-# Gesture persistence
-
-Learned gesture information survives application restarts.
-
-The application stores local adaptive memory under the project's data directory, including files such as:
-
-```text
-data/gesture_memory.json
-data/dynamic_gesture_memory.json
-```
-
-These files are local runtime data and are ignored by Git.
-
-The stored information contains numerical gesture representations such as normalized landmarks, positive exemplars, negative examples, and dynamic trajectories.
-
-The application does **not** need to save raw webcam videos in order to remember learned gestures.
-
----
-
-# Gesture management
-
-The application provides management controls for the learned gesture vocabulary.
-
-Depending on gesture type and current UI section, available actions include:
-
-- rename a gesture;
-- delete a gesture;
-- improve an existing static gesture with additional examples;
-- retrain/reset a gesture representation;
-- clear stored gesture memory;
-- manage dynamic gesture demonstrations.
-
-Because changes are persisted, they remain available the next time the application is opened.
-
----
-
-# Frontends
-
-## Tkinter — primary frontend
-
-Run:
+Run the complete test suite:
 
 ```powershell
-uv run python scripts\interactive_online_learning.py
+uv run pytest --basetemp=.pytest_tmp
 ```
 
-This is currently the most tested and supported frontend.
+The explicit `--basetemp` is recommended on Windows because some systems restrict access to pytest's default temporary directory.
 
-## PySide6 / Qt — WIP experimental frontend
+The test suite covers components such as:
 
-Install the optional Qt dependency group:
+- feature normalization;
+- geometry-aware descriptors;
+- EVT/open-set logic;
+- metric embedding;
+- persistence;
+- exemplar memory;
+- temporal prototypes;
+- MediaPipe Tasks runtime helpers;
+- teaching readiness;
+- responsive UI layout helpers.
+
+---
+
+# Optional Qt Frontend
+
+An experimental PySide6 frontend is preserved at:
+
+```text
+scripts/interactive_online_learning_qt.py
+```
+
+Install Qt dependencies:
 
 ```powershell
 uv sync --extra dev --extra qt
@@ -608,9 +1382,13 @@ Run:
 uv run python scripts\interactive_online_learning_qt.py
 ```
 
-The Qt interface is experimental and may not always expose every feature exactly like the primary Tkinter application.
+This frontend is currently **experimental / WIP**.
 
-## Web design lab — WIP
+The Tkinter application remains the primary implementation.
+
+---
+
+# Experimental Web Frontend
 
 The repository also contains:
 
@@ -618,86 +1396,27 @@ The repository also contains:
 frontend-design-lab/
 ```
 
-This is an experimental web-interface/design environment and is **not currently the supported runtime frontend for the Python recognition engine**.
+This is a separate experimental frontend design environment.
 
-See `FRONTEND_WIP.md` for the current frontend status.
+It is not currently the primary runtime interface and may require its own Node-based setup.
 
----
-
-# Running tests
-
-Install the development dependency group:
-
-```powershell
-uv sync --extra dev
-```
-
-Run:
-
-```powershell
-uv run pytest --basetemp=.pytest_tmp
-```
-
-The test suite covers core numerical behavior and integration paths such as:
-
-- feature calculations;
-- static learner behavior;
-- prediction stabilization;
-- persistence round trips;
-- dynamic gesture memory;
-- confidence-scoring logic;
-- other core backend components.
-
-The test suite intentionally does not replace real webcam/user evaluation.
-
----
-
-# Logs
-
-Runtime logs are written under:
-
-```text
-logs/
-```
-
-For example:
-
-```text
-logs/adaptive_gesture.log
-```
-
-Logs can be useful when debugging startup, persistence, webcam, or unexpected runtime problems.
-
-The log directory is ignored by Git.
+The backend/recognition architecture is intentionally kept sufficiently modular so different frontends can be explored later.
 
 ---
 
 # Troubleshooting
 
-## Camera does not open
+## `cv2.VideoCapture` Does Not Exist
 
-First verify that:
+Symptom:
 
-- another application is not currently using the webcam;
-- Windows camera privacy settings allow desktop applications to use the camera;
-- you are running the primary app only once;
-- the Qt and Tkinter versions are not open simultaneously.
-
-Then launch again:
-
-```powershell
-uv run python scripts\interactive_online_learning.py
+```text
+AttributeError: module 'cv2' has no attribute 'VideoCapture'
 ```
 
-## `cv2.VideoCapture` is missing
+This may occur if multiple OpenCV wheels previously shared the same `cv2` namespace and an uninstall left the environment partially broken.
 
-If OpenCV imports but camera APIs such as `VideoCapture` are missing, repair the declared OpenCV package:
-
-```powershell
-uv sync --extra dev --reinstall-package opencv-contrib-python
-```
-
-If you also use the experimental Qt frontend:
+Repair the declared OpenCV package:
 
 ```powershell
 uv sync --extra dev --extra qt --reinstall-package opencv-contrib-python
@@ -709,155 +1428,329 @@ Verify:
 uv run python -c "import cv2; print(cv2.__version__); print(hasattr(cv2, 'VideoCapture')); print(hasattr(cv2, 'CAP_DSHOW'))"
 ```
 
-On the current Windows setup, the final two values should be `True`.
+Expected:
 
-## Pytest temporary-folder permission error on Windows
+```text
+True
+True
+```
 
-If pytest reports `WinError 5` under the user's Windows temporary directory, run:
+---
+
+## Pytest Permission Error on Windows
+
+Example:
+
+```text
+PermissionError:
+C:\Users\<user>\AppData\Local\Temp\pytest-of-...
+```
+
+Run:
 
 ```powershell
 uv run pytest --basetemp=.pytest_tmp
 ```
 
-The `.pytest_tmp/` directory is ignored by Git.
+---
 
-## Rebuild the virtual environment
+## PowerShell Refuses to Activate `.venv`
 
-If the environment becomes inconsistent:
+Activation is not required when using `uv run`.
+
+Instead of:
 
 ```powershell
-Remove-Item -Recurse -Force .venv
-uv sync --extra dev
+.venv\Scripts\Activate.ps1
 ```
 
-For the optional Qt frontend:
+simply use:
 
 ```powershell
-uv sync --extra dev --extra qt
+uv run python ...
+```
+
+If manual activation is desired:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.venv\Scripts\Activate.ps1
+```
+
+This changes policy only for the current PowerShell process.
+
+---
+
+## Webcam Does Not Open
+
+Check another application is not currently using the camera.
+
+You can also test OpenCV directly:
+
+```powershell
+uv run python -c "import cv2; c=cv2.VideoCapture(0, cv2.CAP_DSHOW); print(c.isOpened()); c.release()"
 ```
 
 ---
 
-# Development workflow
+## First V3.6 Launch Cannot Find Hand Landmarker Model
 
-The recommended development workflow is:
+Use the helper script:
 
 ```powershell
-# Synchronize dependencies
-uv sync --extra dev
+uv run python scripts\download_v3_hand_landmarker_model.py
+```
 
-# Run tests
+Then test the backend:
+
+```powershell
+uv run python scripts\test_v3_tasks_backend.py
+```
+
+---
+
+## Recognition Becomes UNKNOWN After Hand Leaves Frame
+
+The current V3 branch contains reacquisition logic designed to clear stale tracking identity when a hand disappears and later returns.
+
+If this happens unexpectedly, verify that you are using the latest:
+
+```text
+v3-geometry-aware-research
+```
+
+branch.
+
+---
+
+# Research Direction
+
+The current V3 system is intended as a research prototype rather than a claim of a completed universal sign-language translator.
+
+Important future evaluation directions include:
+
+## Few-Shot Learning
+
+Compare:
+
+```text
+1 shot
+3 shots
+6 shots
+12 shots
+```
+
+for unseen gestures.
+
+---
+
+## Ablation Studies
+
+Potential comparisons:
+
+```text
+V2 normalized coordinates
+vs
+V3.1 geometry-aware hybrid features
+```
+
+```text
+radius-based open-set rejection
+vs
+V3.2 EVT-inspired rejection
+```
+
+```text
+raw/hybrid feature space
+vs
+V3.3 metric embedding
+```
+
+```text
+FIFO exemplar memory
+vs
+V3.4 diversity-aware memory
+```
+
+```text
+nearest dynamic demonstration
+vs
+V3.5 temporal prototypes
+```
+
+---
+
+## Multi-User Evaluation
+
+Evaluate:
+
+- different users;
+- different hand sizes;
+- different camera distances;
+- different viewing angles;
+- user-specific personalization;
+- cross-user generalization.
+
+---
+
+## Open-Set Evaluation
+
+Measure how well the system distinguishes:
+
+```text
+known gesture
+```
+
+from:
+
+```text
+previously unseen gesture
+```
+
+Potential metrics include:
+
+- known-class accuracy;
+- unknown rejection rate;
+- false acceptance rate;
+- false rejection rate;
+- AUROC / open-set curves.
+
+---
+
+## Feedback Adaptation
+
+Evaluate recognition:
+
+```text
+before user feedback
+```
+
+versus:
+
+```text
+after positive / corrective feedback
+```
+
+to determine whether online personalization produces measurable improvements.
+
+---
+
+## Runtime Evaluation
+
+Measure:
+
+- camera FPS;
+- landmark latency;
+- recognition latency;
+- memory usage;
+- storage size;
+- effect of asynchronous tracking;
+- one-hand vs two-hand cost;
+- static vs dynamic cost.
+
+---
+
+## Confidence Calibration
+
+The current confidence value is an index rather than a calibrated probability.
+
+Future work can investigate:
+
+- held-out calibration;
+- reliability diagrams;
+- Expected Calibration Error;
+- conformal prediction;
+- calibrated open-set confidence.
+
+---
+
+# Current Limitations
+
+The current project should not yet be interpreted as a complete continuous sign-language translation system.
+
+Current limitations include:
+
+- primary focus is isolated user-defined gestures/signs;
+- continuous sentence-level sign segmentation is not implemented;
+- facial expressions and other non-manual sign-language cues are not currently modeled;
+- body pose/context is not currently part of the main classifier;
+- the learned metric encoder still requires stronger formal source/target evaluation;
+- EVT thresholds require formal validation;
+- dynamic gesture structure still needs deeper refinement;
+- confidence is not a calibrated probability;
+- formal multi-user benchmark results are still required;
+- MediaPipe landmark quality depends on visibility, lighting, camera angle, and occlusion.
+
+---
+
+# Version Summary
+
+| Version | Main Contribution |
+|---|---|
+| V2 | Online few-shot personalized gesture-learning baseline |
+| V3.1 | Geometry-aware hybrid coordinate + angle descriptors |
+| V3.2 | EVT-inspired open-set / UNKNOWN recognition |
+| V3.3 | Learned metric embedding before prototype recognition |
+| V3.4 | Diversity-aware positive and hard-negative exemplar memory |
+| V3.5 | DTW-aligned temporal prototypes for dynamic gestures |
+| V3.6 | MediaPipe Tasks live-stream asynchronous hand tracking |
+| V3.6.1 | Robust hand disappearance and reacquisition handling |
+| V3.6.2 | Hands-free one-hand/two-hand teaching workflow |
+| V3.6.3 | Responsive/scalable Tkinter desktop interface |
+
+---
+
+# Recommended Current Command
+
+For most users testing the latest research version:
+
+```powershell
+git switch v3-geometry-aware-research
+uv sync --extra dev
 uv run pytest --basetemp=.pytest_tmp
-
-# Run application
-uv run python scripts\interactive_online_learning.py
+uv run python scripts\interactive_online_learning_v3.py
 ```
 
-Before committing:
+Then teach a gesture directly from the UI.
 
-```powershell
-git status
+---
+
+# Project Status
+
+The current V3 branch is feature-rich enough for controlled experiments.
+
+The main next phase is:
+
+```text
+formal evaluation
+→ ablation studies
+→ multi-user testing
+→ dynamic-gesture refinement
+→ publication-oriented analysis
 ```
 
-Local runtime artifacts such as learned gesture memory, logs, caches, and virtual environments should remain untracked.
+rather than continuously adding new recognition components.
 
 ---
 
-# Research direction
+## License
 
-The system is designed around the following central research question:
-
-> **Can an interactive gesture recognizer improve continuously through natural user feedback?**
-
-Related areas investigated by the implementation include:
-
-- how few informative examples are required to create a useful class;
-- whether active sample selection is better than consecutive-frame capture;
-- whether adaptive prototypes improve robustness to natural gesture variation;
-- how effectively unseen gestures can be rejected;
-- how user corrections affect personalized recognition;
-- how static and temporal user-defined gestures can coexist in one adaptive system;
-- whether numerical landmark memory can provide practical personalization without retaining raw user video.
+See the repository license file, if present, for usage terms.
 
 ---
 
-# Current evaluation status
+## Acknowledgements
 
-The recognition pipeline and its major interaction mechanisms are implemented and covered by automated backend tests and manual runtime testing.
+This project builds on open-source and research ideas from areas including:
 
-A larger formal evaluation remains a separate research phase. Planned evaluation includes:
+- MediaPipe hand landmark tracking;
+- few-shot metric learning;
+- prototypical recognition;
+- geometry-aware landmark representations;
+- open-set recognition;
+- Extreme Value Theory;
+- exemplar-based incremental learning;
+- Dynamic Time Warping;
+- temporal averaging/prototypes.
 
-- multiple participants;
-- multiple static and dynamic classes;
-- accuracy, precision, recall, and F1;
-- confusion matrices;
-- open-set/UNKNOWN evaluation;
-- before/after-feedback experiments;
-- few-shot sample-count ablations;
-- Smart Capture ablations;
-- one-hand versus two-hand analysis;
-- DTW threshold/window analysis;
-- confidence calibration analysis;
-- latency, FPS, and storage measurements.
-
-Until such a benchmark is completed, the repository should not be interpreted as claiming a universal sign-language recognition accuracy figure.
-
----
-
-# Important limitations
-
-- Recognition is based primarily on hand landmarks.
-- Full sign languages can depend on facial expression, body posture, signing space, grammar, and context beyond the hands.
-- The current system is best described as an **adaptive hand gesture recognizer**, not a complete continuous sign-language translation engine.
-- Personalized classes may behave differently across users, cameras, viewpoints, and lighting conditions.
-- Confidence values are confidence indices rather than calibrated probabilities.
-- The experimental Qt and web frontends are still work in progress.
-
----
-
-# Recommended demo flow
-
-For a complete demonstration of the system:
-
-1. Start with an empty/new gesture vocabulary.
-2. Teach a static one-hand gesture.
-3. Show that it is recognized immediately.
-4. Present an unseen pose and demonstrate `UNKNOWN` rejection.
-5. Teach a second similar gesture.
-6. Demonstrate `Correct` and `Wrong` feedback.
-7. Restart the application and show persistence.
-8. Teach or demonstrate a two-hand static gesture.
-9. Teach a dynamic gesture such as `Swipe Right`.
-10. Demonstrate dynamic recognition.
-11. Show prediction stabilization and the confidence index.
-12. Open the gesture library and demonstrate management controls.
-
-This sequence highlights the main research contribution: **the gesture vocabulary is created and refined through interaction rather than through a separate offline training workflow.**
-
----
-
-# Contributing / testing on another machine
-
-When testing the project on another user's computer, that user should clone the repository and create their own local gesture memory rather than copying another person's runtime database.
-
-Recommended setup:
-
-```powershell
-git clone https://github.com/skrasib/Sign-Language-Recognition-Using-Hand-Gestures.git
-cd Sign-Language-Recognition-Using-Hand-Gestures
-git switch v2-online-few-shot
-uv python install 3.11.9
-uv sync --extra dev
-uv run pytest --basetemp=.pytest_tmp
-uv run python scripts\interactive_online_learning.py
-```
-
-The new user can then teach their own static and dynamic gesture vocabulary through the application UI.
-
----
-
-## Project status
-
-**V2 is under active research and evaluation.**
-
-The major adaptive-learning features are implemented. Current work is focused on reproducible evaluation, usability refinement, frontend experimentation, and thesis-level experimental validation.
+Specific academic references should be maintained in the project's research documentation and any resulting thesis/paper.
