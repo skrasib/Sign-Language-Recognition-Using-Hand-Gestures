@@ -1,7 +1,12 @@
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 
+from adaptive_gesture.features.geometry_features import (
+    build_hybrid_descriptor,
+    normalized_angle_descriptor,
+)
 from adaptive_gesture.features.normalizer import (
     WRIST,
     calculate_palm_scale_2d,
@@ -9,20 +14,39 @@ from adaptive_gesture.features.normalizer import (
 )
 
 
+FeatureRepresentation = Literal["coordinate", "angle", "hybrid"]
+
+
 @dataclass
 class FrameFeatureSet:
     vector: np.ndarray
     hand_signature: str
     hand_count: int
+    representation: FeatureRepresentation = "coordinate"
 
 
-def _local_features(hand) -> np.ndarray:
-    landmarks = (
+def _source_landmarks(hand) -> np.ndarray:
+    return (
         hand.world_landmarks
         if hand.world_landmarks is not None
         else hand.image_landmarks
     )
-    return normalize_hand_landmarks(landmarks)
+
+
+def _local_features(
+    hand,
+    representation: FeatureRepresentation,
+) -> np.ndarray:
+    landmarks = _source_landmarks(hand)
+
+    if representation == "coordinate":
+        return normalize_hand_landmarks(landmarks)
+    if representation == "angle":
+        return normalized_angle_descriptor(landmarks)
+    if representation == "hybrid":
+        return build_hybrid_descriptor(landmarks)
+
+    raise ValueError(f"Unsupported feature representation: {representation}")
 
 
 def _ordered_two_hands(hands):
@@ -43,35 +67,47 @@ def _ordered_two_hands(hands):
     return ordered[0], ordered[1]
 
 
-def build_frame_features(hands) -> FrameFeatureSet | None:
-    """
-    Build the runtime feature representation.
+def build_frame_features(
+    hands,
+    representation: FeatureRepresentation = "coordinate",
+) -> FrameFeatureSet | None:
+    """Build a static runtime feature representation.
 
-    One hand:
-        63 normalized local XYZ features.
+    ``coordinate`` keeps the original V2 representation:
+        one hand: 63 local XYZ values
+        two hands: 63 + 63 + 3 relative geometry = 129
 
-    Two hands:
-        63 left-local + 63 right-local + 3 relative hand-position features
-        = 129 features.
+    ``angle`` uses geometry-aware joint angles:
+        one hand: 20 angles
+        two hands: 20 + 20 + 3 relative geometry = 43
 
-    The relative features preserve coarse spatial relationships between the
-    two hands while local hand shapes remain translation/scale normalized.
+    ``hybrid`` is the V3 research representation:
+        one hand: 83 coordinate + angle values
+        two hands: 83 + 83 + 3 relative geometry = 169
+
+    The final three two-hand values preserve coarse relative wrist position,
+    while each local hand descriptor remains independent of absolute screen
+    position.
     """
     if not hands:
         return None
 
+    if representation not in ("coordinate", "angle", "hybrid"):
+        raise ValueError(f"Unsupported feature representation: {representation}")
+
     if len(hands) == 1:
         hand = hands[0]
         return FrameFeatureSet(
-            vector=_local_features(hand),
+            vector=_local_features(hand, representation),
             hand_signature=hand.handedness,
             hand_count=1,
+            representation=representation,
         )
 
     left, right = _ordered_two_hands(hands)
 
-    left_features = _local_features(left)
-    right_features = _local_features(right)
+    left_features = _local_features(left, representation)
+    right_features = _local_features(right, representation)
 
     left_image = np.asarray(left.image_landmarks, dtype=np.float32)
     right_image = np.asarray(right.image_landmarks, dtype=np.float32)
@@ -100,4 +136,5 @@ def build_frame_features(hands) -> FrameFeatureSet | None:
         vector=vector,
         hand_signature="Both",
         hand_count=2,
+        representation=representation,
     )

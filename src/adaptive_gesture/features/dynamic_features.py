@@ -65,7 +65,7 @@ def _ordered_two_hands(hands):
 
 def build_dynamic_observation(hands, timestamp: float) -> DynamicObservation | None:
     """Build a dynamic observation from the already-stabilized tracker output."""
-    frame_features = build_frame_features(hands)
+    frame_features = build_frame_features(hands, representation="coordinate")
     if frame_features is None:
         return None
 

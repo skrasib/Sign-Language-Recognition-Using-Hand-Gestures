@@ -40,8 +40,12 @@ def test_one_and_two_hand_feature_dimensions():
     right = FakeHand("Right", make_landmarks(0.20))
     left = FakeHand("Left", make_landmarks(0.55))
 
-    one = build_frame_features([right])
-    two = build_frame_features([left, right])
+    one = build_frame_features([right], representation="coordinate")
+    two = build_frame_features([left, right], representation="coordinate")
+    one_hybrid = build_frame_features([right], representation="hybrid")
+    two_hybrid = build_frame_features([left, right], representation="hybrid")
+    one_angle = build_frame_features([right], representation="angle")
+    two_angle = build_frame_features([left, right], representation="angle")
 
     assert one is not None
     assert one.vector.shape == (63,)
@@ -52,6 +56,19 @@ def test_one_and_two_hand_feature_dimensions():
     assert two.vector.shape == (129,)
     assert two.hand_count == 2
     assert two.hand_signature == "Both"
+
+    assert one_hybrid is not None
+    assert one_hybrid.vector.shape == (83,)
+    assert one_hybrid.representation == "hybrid"
+
+    assert two_hybrid is not None
+    assert two_hybrid.vector.shape == (169,)
+
+    assert one_angle is not None
+    assert one_angle.vector.shape == (20,)
+
+    assert two_angle is not None
+    assert two_angle.vector.shape == (43,)
 
 
 def test_feature_distance_zero_for_identical_vectors():
